@@ -11,6 +11,7 @@ import androidx.activity.viewModels
 import androidx.compose.material3.Surface
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import com.kei.pulse.data.TelemetryReader
 import com.kei.pulse.model.ProfileStateResolver
 import com.kei.pulse.model.TunerState
 import com.kei.pulse.tile.QuickSettingsTileRefresher
@@ -38,6 +39,7 @@ class TileControlActivity : ComponentActivity() {
         TunerViewModel.factory(
             repository = container.repository,
             settingsStorage = container.settingsStorage,
+            telemetryReader = TelemetryReader(container.sysfsReader),
         )
     }
 

@@ -21,12 +21,10 @@ class CpuPolicyDetector(
     }
 
     fun readCurrentMaxValues(policies: List<CpuPolicyInfo>): Map<Int, Int> {
+        val raw = privilegedReader.readAll(policies.map { it.scalingMaxPath })
         return policies.mapNotNull { policy ->
-            val value = if (policy.isGpu) {
-                gpuDetector?.readCurrentMaxKHz(policy)
-            } else {
-                readText(policy.scalingMaxPath)?.toIntOrNull()
-            }
+            val number = raw[policy.scalingMaxPath]?.trim()?.toIntOrNull() ?: return@mapNotNull null
+            val value = if (policy.isGpu) gpuDetector?.kHzForLevel(policy, number) else number
             value?.let { policy.id to it }
         }.toMap()
     }

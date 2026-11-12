@@ -7,6 +7,7 @@ import com.kei.pulse.data.GovernorController
 import com.kei.pulse.data.GpuFreqDetector
 import com.kei.pulse.data.PerAppConfigStorage
 import com.kei.pulse.data.PerformanceRepository
+import com.kei.pulse.data.PrivilegedSysfsReader
 import com.kei.pulse.data.ProfileStorage
 import com.kei.pulse.data.SettingsStorage
 import com.kei.pulse.root.PerformanceCommandBuilder
@@ -24,12 +25,16 @@ class AppContainer(context: Context) {
         PerAppConfigStorage(appContext)
     }
 
+    val sysfsReader: PrivilegedSysfsReader by lazy {
+        PServerSysfsReader(appContext)
+    }
+
     val repository: PerformanceRepository by lazy {
         PerformanceRepository(
             detector = CpuPolicyDetector(
-                privilegedReader = PServerSysfsReader(appContext),
+                privilegedReader = sysfsReader,
                 gpuDetector = GpuFreqDetector(
-                    privilegedReader = PServerSysfsReader(appContext),
+                    privilegedReader = sysfsReader,
                 ),
             ),
             bundledProfileProvider = BundledProfileProvider(appContext),

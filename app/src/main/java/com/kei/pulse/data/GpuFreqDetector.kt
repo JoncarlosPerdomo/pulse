@@ -62,8 +62,10 @@ class GpuFreqDetector(
     /** Reads the live GPU ceiling (kHz) by mapping the current power level back to a freq. */
     fun readCurrentMaxKHz(policy: CpuPolicyInfo): Int? {
         val level = readInt(policy.scalingMaxPath) ?: return null
-        return freqForLevel(policy.supportedFrequencies, level)
+        return kHzForLevel(policy, level)
     }
+
+    fun kHzForLevel(policy: CpuPolicyInfo, level: Int): Int = freqForLevel(policy.supportedFrequencies, level)
 
     private val kgslRoot: String?
         get() = listOf(

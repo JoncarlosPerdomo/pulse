@@ -22,15 +22,23 @@ object RootSupport {
         }
     }
 
-    // The generated script lives in app-private storage but MUST be world-readable/-executable: the stock
-    // PServer service runs it as root from a DIFFERENT uid, so it has to read+exec our file. This is the core
-    // of the no-root mechanism, not an oversight — hence the deliberate suppression.
-    @android.annotation.SuppressLint("SetWorldReadable")
     fun runGeneratedScript(
         context: Context,
         scriptName: String,
         scriptContents: String,
-    ): String? {
+    ): String? = runScript(writeScript(context, scriptName, scriptContents))
+
+    fun runScript(scriptFile: File): String? = runRootCommand("sh ${scriptFile.absolutePath}")
+
+    // The generated script lives in app-private storage but MUST be world-readable/-executable: the stock
+    // PServer service runs it as root from a DIFFERENT uid, so it has to read+exec our file. This is the core
+    // of the no-root mechanism, not an oversight — hence the deliberate suppression.
+    @android.annotation.SuppressLint("SetWorldReadable")
+    fun writeScript(
+        context: Context,
+        scriptName: String,
+        scriptContents: String,
+    ): File {
         val scriptDir = File(context.filesDir, "root-scripts")
         if (!scriptDir.exists()) {
             scriptDir.mkdirs()
@@ -40,8 +48,6 @@ object RootSupport {
         scriptFile.writeText(scriptContents)
         scriptFile.setReadable(true, false)
         scriptFile.setExecutable(true, false)
-
-        val command = "sh ${scriptFile.absolutePath}"
-        return runRootCommand(command)
+        return scriptFile
     }
 }

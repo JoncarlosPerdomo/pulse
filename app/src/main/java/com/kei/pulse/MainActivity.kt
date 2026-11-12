@@ -23,6 +23,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.kei.pulse.appwatch.ForegroundAppMonitorService
+import com.kei.pulse.data.TelemetryReader
 import com.kei.pulse.overlay.PerformanceOverlay
 import com.kei.pulse.sleep.SleepProfileMonitorService
 import com.kei.pulse.tile.QuickSettingsTileAddResult
@@ -46,6 +47,7 @@ class MainActivity : ComponentActivity() {
         TunerViewModel.factory(
             repository = container.repository,
             settingsStorage = container.settingsStorage,
+            telemetryReader = TelemetryReader(container.sysfsReader),
             perAppConfigStorage = container.perAppConfigStorage,
         )
     }
