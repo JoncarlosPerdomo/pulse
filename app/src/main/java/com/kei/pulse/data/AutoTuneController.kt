@@ -3,6 +3,8 @@ package com.kei.pulse.data
 import com.kei.pulse.model.AutoTdpBias
 import com.kei.pulse.model.CpuPolicyInfo
 import com.kei.pulse.root.PerformanceCommandBuilder
+import com.kei.pulse.root.PServerShell
+import com.kei.pulse.root.PrivilegedShell
 import com.kei.pulse.root.RootSupport
 import kotlin.math.abs
 
@@ -1111,7 +1113,11 @@ class AutoTuneController(
          * set so the prime is identified correctly; only ids present in [freqs] are written, so an uncapped
          * cluster (incl. an uncapped prime, whose min we then never touch) is left completely alone.
          */
-        fun applyFreqsToDevice(policies: List<CpuPolicyInfo>, freqs: Map<Int, Int>) {
+        fun applyFreqsToDevice(
+            policies: List<CpuPolicyInfo>,
+            freqs: Map<Int, Int>,
+            shell: PrivilegedShell = PServerShell,
+        ) {
             if (policies.isEmpty() || freqs.isEmpty()) return
             runScript(
                 PerformanceCommandBuilder().buildApplyScript(
@@ -1120,6 +1126,7 @@ class AutoTuneController(
                     isReset = false,
                     lowerMinPolicyIds = setOfNotNull(primePolicyId(policies)),
                 ),
+                shell,
             )
         }
 
@@ -1175,12 +1182,12 @@ class AutoTuneController(
                 p.id to (p.supportedFrequencies.minByOrNull { abs(it - target) } ?: p.selectableMaxFreq)
             }
 
-        private fun runScript(script: String) {
+        private fun runScript(script: String, shell: PrivilegedShell = PServerShell) {
             val cmd = script.lineSequence()
                 .map { it.trim() }
                 .filter { it.isNotEmpty() && !it.startsWith("#") }
                 .joinToString("; ")
-            if (cmd.isNotEmpty()) RootSupport.runRootCommand(cmd)
+            if (cmd.isNotEmpty()) shell.run(cmd)
         }
 
         /** Offline (`online=false`) or online the given CPU cores via their `cpuN/online` node. */

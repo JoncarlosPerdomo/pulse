@@ -1,12 +1,14 @@
 package com.kei.pulse.data
 
 import com.kei.pulse.model.CpuPolicyInfo
+import com.kei.pulse.root.PServerShell
+import com.kei.pulse.root.PrivilegedShell
 import com.kei.pulse.root.RootSupport
 import kotlin.math.pow
 
-private fun cat(path: String): String? {
+private fun cat(path: String, shell: PrivilegedShell = PServerShell): String? {
     val escaped = path.replace("'", "'\\''")
-    return RootSupport.runRootCommand("cat '$escaped' 2>/dev/null")?.trim()?.takeIf { it.isNotEmpty() }
+    return shell.run("cat '$escaped' 2>/dev/null")?.trim()?.takeIf { it.isNotEmpty() }
 }
 
 private const val BATTERY_DIR = "/sys/class/power_supply/battery"
@@ -43,11 +45,11 @@ object BatteryReader {
 }
 
 /** Per-cluster CPU governor control. Reversible (set back to Balanced). */
-class GovernorController {
-    fun readGovernor(policy: CpuPolicyInfo): String? = cat("${policy.policyPath}/scaling_governor")
+class GovernorController(private val shell: PrivilegedShell = PServerShell) {
+    fun readGovernor(policy: CpuPolicyInfo): String? = cat("${policy.policyPath}/scaling_governor", shell)
 
     private fun availableGovernors(policy: CpuPolicyInfo): List<String> =
-        cat("${policy.policyPath}/scaling_available_governors")
+        cat("${policy.policyPath}/scaling_available_governors", shell)
             ?.split(Regex("\\s+"))?.filter { it.isNotBlank() } ?: emptyList()
 
     /** Writes a raw kernel governor name to every CPU policy (used to restore a captured governor). */
@@ -58,7 +60,7 @@ class GovernorController {
             val path = "${p.policyPath}/scaling_governor"
             "chmod 666 $path; echo $governor > $path; chmod 644 $path"
         }
-        RootSupport.runRootCommand(cmd)
+        shell.run(cmd)
         return true
     }
 
@@ -73,7 +75,7 @@ class GovernorController {
             val path = "${p.policyPath}/scaling_governor"
             "chmod 666 $path; echo $chosen > $path; chmod 644 $path"
         }
-        RootSupport.runRootCommand(cmd)
+        shell.run(cmd)
         return chosen
     }
 
@@ -118,10 +120,10 @@ class RefreshRateController {
  * GPU into a band. A higher index = slower clock, so the floor's index is >= the ceiling's,
  * which the kernel requires. Passing the slowest level clears the floor.
  */
-class GpuFloorController {
+class GpuFloorController(private val shell: PrivilegedShell = PServerShell) {
     fun setFloorLevel(kgslRoot: String, floorLevel: Int): Boolean {
         val path = "$kgslRoot/min_pwrlevel"
-        RootSupport.runRootCommand("chmod 666 $path; echo $floorLevel > $path; chmod 444 $path")
+        shell.run("chmod 666 $path; echo $floorLevel > $path; chmod 444 $path")
         return true
     }
 
@@ -132,13 +134,13 @@ class GpuFloorController {
     fun lockToCurrentCap(kgslRoot: String): Int? {
         val maxP = "$kgslRoot/max_pwrlevel"
         val minP = "$kgslRoot/min_pwrlevel"
-        val level = RootSupport.runRootCommand("cat $maxP")?.trim()?.toIntOrNull() ?: return null
-        RootSupport.runRootCommand(
+        val level = shell.run("cat $maxP")?.trim()?.toIntOrNull() ?: return null
+        shell.run(
             "chmod 666 $maxP; chmod 666 $minP; " +
                 "echo $level > $maxP; echo $level > $minP; " +
                 "chmod 444 $maxP; chmod 444 $minP",
         )
-        return RootSupport.runRootCommand("cat $minP")?.trim()?.toIntOrNull()
+        return shell.run("cat $minP")?.trim()?.toIntOrNull()
     }
 }
 
@@ -443,7 +445,7 @@ object PowerEstimator {
 }
 
 /** CPU minimum-frequency floor via per-policy `scaling_min_freq`. Reversible (0 = lowest OPP). */
-class CpuFloorController {
+class CpuFloorController(private val shell: PrivilegedShell = PServerShell) {
     /**
      * Raise each non-prime cluster's `scaling_min` to a percentage of its max, or (on `percent <= 0`)
      * reset every cluster's min to its lowest OPP.
@@ -471,20 +473,20 @@ class CpuFloorController {
                 val path = "${p.policyPath}/scaling_min_freq"
                 "chmod 666 $path; echo ${p.minFreq} > $path; chmod 644 $path"
             }
-            RootSupport.runRootCommand(cmd)
+            shell.run(cmd)
             return true
         }
         // Raise: skip the PRIME (its min is the cap apply's 444-locked node) and clamp the rest to <= cap.
         val cmd = floorableClusters(cpu).joinToString("; ") { p ->
             // Never raise this cluster's min above its current cap (scaling_max) — that would make the
             // kernel clamp the cap back up. Live-read the cap; fall back to the requested floor if absent.
-            val cap = cat("${p.policyPath}/scaling_max_freq")?.toIntOrNull()
+            val cap = cat("${p.policyPath}/scaling_max_freq", shell)?.toIntOrNull()
             val target = floorTargetFor(p, percent, cap)
             val path = "${p.policyPath}/scaling_min_freq"
             "chmod 666 $path; echo $target > $path; chmod 644 $path"
         }
         if (cmd.isBlank()) return true // only a prime cluster exists (nothing safe to floor) — no-op success
-        RootSupport.runRootCommand(cmd)
+        shell.run(cmd)
         return true
     }
 
