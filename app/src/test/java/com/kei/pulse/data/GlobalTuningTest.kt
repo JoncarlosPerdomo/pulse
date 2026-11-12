@@ -161,6 +161,25 @@ class GlobalTuningTest {
         assertEquals(PowerTier.CUSTOM, store.state.tier)
     }
 
+    @Test
+    fun `device commands run off the calling thread`() = runTest {
+        givenCustomSetup()
+        val caller = Thread.currentThread()
+        val checkedShell = PrivilegedShell { command ->
+            assertFalse("Device command ran on the caller thread", Thread.currentThread() === caller)
+            shell.run(command)
+        }
+        val checkedTuning = GlobalTuning(store, caps, checkedShell, { ownership })
+
+        checkedTuning.switchTo(PowerTier.MAX)
+        checkedTuning.switchTo(PowerTier.CUSTOM)
+        checkedTuning.edit(SideControlEdit.CpuFloor(50))
+        checkedTuning.edit(SideControlEdit.GpuFloor(50))
+        checkedTuning.edit(SideControlEdit.GpuLock(true))
+        checkedTuning.edit(SideControlEdit.PrimeBoost(true))
+        checkedTuning.edit(SideControlEdit.Governor(GovernorController.OPTIONS.first()))
+        assertTrue(shell.commands.isNotEmpty())
+    }
     private fun policy(id: Int, freqs: List<Int>, path: String = "/sys/devices/system/cpu/cpufreq/policy$id") =
         CpuPolicyInfo(
             id = id,

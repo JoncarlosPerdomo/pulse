@@ -9,6 +9,8 @@ import com.kei.pulse.model.PowerTier
 import com.kei.pulse.model.SideControlState
 import com.kei.pulse.model.TierTransition
 import com.kei.pulse.root.PrivilegedShell
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.math.abs
@@ -79,114 +81,118 @@ class GlobalTuning(
     private val cpuFloor = CpuFloorController(shell)
     private val gpuFloor = GpuFloorController(shell)
 
-    suspend fun switchTo(tier: PowerTier): TuningOutcome = mutex.withLock {
-        if (!caps.isAvailable) return TuningOutcome.Failed(FailureReason.PSERVER_UNAVAILABLE)
-        val policies = caps.policies()
-        if (policies.isEmpty()) return TuningOutcome.Failed(FailureReason.NO_POLICIES)
-        val snapshot = store.customSnapshot()
-        val next = TuningState(
-            tier = tier,
-            sideControls = if (tier == PowerTier.CUSTOM) {
-                TierTransition.afterCustomRestore(snapshot)
-            } else {
-                TierTransition.afterPreset(store.state().sideControls)
-            },
-        )
-        ownership().withOwnership {
-            when (owner) {
-                is ClockOwner.BoundGame -> return@withOwnership TuningOutcome.Blocked
-                ClockOwner.GlobalAutoTdp -> releaseGlobalAutoTdp()
-                ClockOwner.Free -> Unit
+    suspend fun switchTo(tier: PowerTier): TuningOutcome = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            if (!caps.isAvailable) return@withLock TuningOutcome.Failed(FailureReason.PSERVER_UNAVAILABLE)
+            val policies = caps.policies()
+            if (policies.isEmpty()) return@withLock TuningOutcome.Failed(FailureReason.NO_POLICIES)
+            val snapshot = store.customSnapshot()
+            val next = TuningState(
+                tier = tier,
+                sideControls = if (tier == PowerTier.CUSTOM) {
+                    TierTransition.afterCustomRestore(snapshot)
+                } else {
+                    TierTransition.afterPreset(store.state().sideControls)
+                },
+            )
+            ownership().withOwnership {
+                when (owner) {
+                    is ClockOwner.BoundGame -> return@withOwnership TuningOutcome.Blocked
+                    ClockOwner.GlobalAutoTdp -> releaseGlobalAutoTdp()
+                    ClockOwner.Free -> Unit
+                }
+                val outcome = if (tier == PowerTier.CUSTOM) restoreCustom(policies, snapshot) else applyPreset(policies, tier)
+                val presetFailed = outcome is TuningOutcome.Failed && tier != PowerTier.CUSTOM
+                if (!presetFailed) persist(next)
+                capsWritten()
+                outcome
             }
-            val outcome = if (tier == PowerTier.CUSTOM) restoreCustom(policies, snapshot) else applyPreset(policies, tier)
-            val presetFailed = outcome is TuningOutcome.Failed && tier != PowerTier.CUSTOM
-            if (!presetFailed) persist(next)
-            capsWritten()
-            outcome
         }
     }
 
     /** Re-apply the active Tier (e.g. after AutoTDP hands the clocks back). */
     suspend fun reapply(): TuningOutcome = switchTo(store.state().tier)
 
-    suspend fun edit(edit: SideControlEdit): TuningOutcome = mutex.withLock {
-        val policies = caps.policies()
-        if (policies.isEmpty()) return TuningOutcome.Failed(FailureReason.NO_POLICIES)
-        val current = store.state()
-        val side = current.sideControls
-        val gpu = policies.firstOrNull { it.isGpu }
-        val prime = primeOf(policies)
-        val nextSide = when (edit) {
-            is SideControlEdit.PowerTarget ->
-                TierTransition.afterPowerTargetEnabled(side, edit.enabled).copy(powerTargetPercent = edit.percent)
-            is SideControlEdit.PowerTargetCpuOnly -> side.copy(powerTargetCpuOnly = edit.cpuOnly)
-            is SideControlEdit.GpuLock -> TierTransition.afterGpuLock(side, edit.locked)
-            is SideControlEdit.GpuFloor -> TierTransition.afterGpuFloor(side, edit.percent)
-            is SideControlEdit.CpuFloor -> TierTransition.afterCpuFloor(side, edit.percent)
-            is SideControlEdit.PrimeBoost -> TierTransition.afterPrimeBoost(side, edit.limited)
-            is SideControlEdit.Governor -> side
-        }
-        val writesPowerTargetCaps = when (edit) {
-            is SideControlEdit.PowerTarget -> edit.enabled || edit.percent >= 100
-            is SideControlEdit.PowerTargetCpuOnly -> nextSide.powerTargetEnabled
-            else -> false
-        }
-        val next = TuningState(if (writesPowerTargetCaps) PowerTier.CUSTOM else current.tier, nextSide)
-        val governorLabel = (edit as? SideControlEdit.Governor)?.option?.label
+    suspend fun edit(edit: SideControlEdit): TuningOutcome = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val policies = caps.policies()
+            if (policies.isEmpty()) return@withLock TuningOutcome.Failed(FailureReason.NO_POLICIES)
+            val current = store.state()
+            val side = current.sideControls
+            val gpu = policies.firstOrNull { it.isGpu }
+            val prime = primeOf(policies)
+            val nextSide = when (edit) {
+                is SideControlEdit.PowerTarget ->
+                    TierTransition.afterPowerTargetEnabled(side, edit.enabled).copy(powerTargetPercent = edit.percent)
+                is SideControlEdit.PowerTargetCpuOnly -> side.copy(powerTargetCpuOnly = edit.cpuOnly)
+                is SideControlEdit.GpuLock -> TierTransition.afterGpuLock(side, edit.locked)
+                is SideControlEdit.GpuFloor -> TierTransition.afterGpuFloor(side, edit.percent)
+                is SideControlEdit.CpuFloor -> TierTransition.afterCpuFloor(side, edit.percent)
+                is SideControlEdit.PrimeBoost -> TierTransition.afterPrimeBoost(side, edit.limited)
+                is SideControlEdit.Governor -> side
+            }
+            val writesPowerTargetCaps = when (edit) {
+                is SideControlEdit.PowerTarget -> edit.enabled || edit.percent >= 100
+                is SideControlEdit.PowerTargetCpuOnly -> nextSide.powerTargetEnabled
+                else -> false
+            }
+            val next = TuningState(if (writesPowerTargetCaps) PowerTier.CUSTOM else current.tier, nextSide)
+            val governorLabel = (edit as? SideControlEdit.Governor)?.option?.label
 
-        ownership().withOwnership {
-            val deviceAllowed = when (val now = owner) {
-                ClockOwner.Free -> true
-                is ClockOwner.BoundGame -> !now.autoTdp
-                ClockOwner.GlobalAutoTdp -> false
-            }
-            if (!deviceAllowed) {
-                persist(next, governorLabel)
-                return@withOwnership TuningOutcome.Deferred
-            }
+            ownership().withOwnership {
+                val deviceAllowed = when (val now = owner) {
+                    ClockOwner.Free -> true
+                    is ClockOwner.BoundGame -> !now.autoTdp
+                    ClockOwner.GlobalAutoTdp -> false
+                }
+                if (!deviceAllowed) {
+                    persist(next, governorLabel)
+                    return@withOwnership TuningOutcome.Deferred
+                }
 
-            val outcome = when (edit) {
-                is SideControlEdit.PowerTarget, is SideControlEdit.PowerTargetCpuOnly ->
-                    if (writesPowerTargetCaps) {
-                        applyPowerTargetCaps(policies, nextSide).toOutcome()
-                    } else {
+                val outcome = when (edit) {
+                    is SideControlEdit.PowerTarget, is SideControlEdit.PowerTargetCpuOnly ->
+                        if (writesPowerTargetCaps) {
+                            applyPowerTargetCaps(policies, nextSide).toOutcome()
+                        } else {
+                            TuningOutcome.Applied()
+                        }
+                    is SideControlEdit.GpuLock -> {
+                        if (gpu == null) return@withOwnership TuningOutcome.Failed(FailureReason.NO_GPU)
+                        if (edit.locked) {
+                            TuningOutcome.Applied(gpuLockLevel = gpuFloor.lockToCurrentCap(gpu.policyPath))
+                        } else {
+                            gpuFloor.setFloorLevel(gpu.policyPath, slowestGpuLevel(gpu))
+                            TuningOutcome.Applied()
+                        }
+                    }
+                    is SideControlEdit.GpuFloor -> {
+                        if (gpu == null) return@withOwnership TuningOutcome.Failed(FailureReason.NO_GPU)
+                        gpuFloor.setFloorLevel(gpu.policyPath, gpuFloorLevelFor(gpu, edit.percent))
                         TuningOutcome.Applied()
                     }
-                is SideControlEdit.GpuLock -> {
-                    if (gpu == null) return@withOwnership TuningOutcome.Failed(FailureReason.NO_GPU)
-                    if (edit.locked) {
-                        TuningOutcome.Applied(gpuLockLevel = gpuFloor.lockToCurrentCap(gpu.policyPath))
-                    } else {
-                        gpuFloor.setFloorLevel(gpu.policyPath, slowestGpuLevel(gpu))
+                    is SideControlEdit.CpuFloor ->
+                        if (cpuFloor.setFloor(policies, edit.percent)) {
+                            TuningOutcome.Applied()
+                        } else {
+                            TuningOutcome.Failed(FailureReason.WRITE_FAILED)
+                        }
+                    is SideControlEdit.PrimeBoost -> {
+                        if (prime == null) return@withOwnership TuningOutcome.Failed(FailureReason.NO_PRIME)
+                        val target = if (edit.limited) noTurboFreq(prime) else store.lastValues()[prime.id] ?: prime.selectableMaxFreq
+                        AutoTuneController.applyFreqsToDevice(policies, mapOf(prime.id to target), shell)
                         TuningOutcome.Applied()
                     }
-                }
-                is SideControlEdit.GpuFloor -> {
-                    if (gpu == null) return@withOwnership TuningOutcome.Failed(FailureReason.NO_GPU)
-                    gpuFloor.setFloorLevel(gpu.policyPath, gpuFloorLevelFor(gpu, edit.percent))
-                    TuningOutcome.Applied()
-                }
-                is SideControlEdit.CpuFloor ->
-                    if (cpuFloor.setFloor(policies, edit.percent)) {
-                        TuningOutcome.Applied()
-                    } else {
-                        TuningOutcome.Failed(FailureReason.WRITE_FAILED)
+                    is SideControlEdit.Governor -> {
+                        val chosen = governors.setGovernor(policies, edit.option)
+                        if (chosen != null) TuningOutcome.Applied(governor = chosen) else TuningOutcome.Failed(FailureReason.WRITE_FAILED)
                     }
-                is SideControlEdit.PrimeBoost -> {
-                    if (prime == null) return@withOwnership TuningOutcome.Failed(FailureReason.NO_PRIME)
-                    val target = if (edit.limited) noTurboFreq(prime) else store.lastValues()[prime.id] ?: prime.selectableMaxFreq
-                    AutoTuneController.applyFreqsToDevice(policies, mapOf(prime.id to target), shell)
-                    TuningOutcome.Applied()
                 }
-                is SideControlEdit.Governor -> {
-                    val chosen = governors.setGovernor(policies, edit.option)
-                    if (chosen != null) TuningOutcome.Applied(governor = chosen) else TuningOutcome.Failed(FailureReason.WRITE_FAILED)
-                }
+                val governorFailed = edit is SideControlEdit.Governor && outcome is TuningOutcome.Failed
+                persist(next, governorLabel.takeUnless { governorFailed })
+                capsWritten()
+                outcome
             }
-            val governorFailed = edit is SideControlEdit.Governor && outcome is TuningOutcome.Failed
-            persist(next, governorLabel.takeUnless { governorFailed })
-            capsWritten()
-            outcome
         }
     }
 
