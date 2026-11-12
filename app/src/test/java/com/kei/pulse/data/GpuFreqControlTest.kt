@@ -55,7 +55,6 @@ class GpuFreqControlTest {
         val detector = GpuFreqDetector(reader("6")) // level 6 = 660 MHz
         val policy = detector.detectAsPolicy()!!
         assertEquals(660_000, policy.currentMaxFreq)
-        assertEquals(660_000, detector.readCurrentMaxKHz(policy))
     }
 
     @Test

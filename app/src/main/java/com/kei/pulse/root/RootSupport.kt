@@ -9,11 +9,11 @@ object RootSupport {
 
     // Process-wide serialization of PServer access. The binder cannot service overlapping
     // transacts reliably, and several callers (per-app watcher apply, telemetry poll, tile,
-    // sleep monitor) hit it concurrently. Every PServer path — cat() reads and the
-    // runGeneratedScript apply pipeline — funnels through runRootCommand, so locking here
+    // sleep monitor) hit it concurrently. Every PServer path — cat() reads, batched sysfs reads
+    // and generated scripts via runScript — funnels through runRootCommand, so locking here
     // serializes all of them at command granularity. Each command is short and all callers
-    // run on Dispatchers.IO, so a blocking lock is fine. runGeneratedScript does not lock
-    // itself, so there is no re-entrancy.
+    // run on Dispatchers.IO, so a blocking lock is fine. runScript does not lock itself, so
+    // there is no re-entrancy.
     private val pServerLock = ReentrantLock()
 
     fun runRootCommand(command: String): String? {

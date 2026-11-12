@@ -37,7 +37,8 @@ class PServerSysfsReader(
  * (and dies near 4 KB), and replies with only the first line of stdout. So the paths live in a script
  * file, each node is read with the `read` builtin (its first line, as a plain `cat` reply gives), and
  * values are joined by [RECORD] onto a single output line. Output uses mksh's `print` builtin because
- * Android's `printf` is a separate toybox process (~5 ms per call). Measured on the AYN Thor (Android 13).
+ * Android's `printf` is a separate toybox process (~5 ms per call). Measured on the AYN Thor (Android 13):
+ * https://github.com/JoncarlosPerdomo/pulse/pull/2
  */
 internal object SysfsBatch {
     private const val RECORD = '\u0001'

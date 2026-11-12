@@ -59,29 +59,11 @@ class GpuFreqDetector(
         )
     }
 
-    /** Reads the live GPU ceiling (kHz) by mapping the current power level back to a freq. */
-    fun readCurrentMaxKHz(policy: CpuPolicyInfo): Int? {
-        val level = readInt(policy.scalingMaxPath) ?: return null
-        return kHzForLevel(policy, level)
-    }
-
-    fun kHzForLevel(policy: CpuPolicyInfo, level: Int): Int = freqForLevel(policy.supportedFrequencies, level)
-
     private val kgslRoot: String?
         get() = listOf(
             "/sys/class/kgsl/kgsl-3d0",
             "/sys/devices/platform/soc@0/3d00000.gpu/kgsl/kgsl-3d0",
         ).firstOrNull { readText("$it/max_pwrlevel") != null }
-
-    /**
-     * Maps a power-level index to a frequency in kHz. [freqsKHz] is ascending, while power
-     * levels are fastest-first, so level i corresponds to the (N-1-i)th ascending entry.
-     */
-    private fun freqForLevel(freqsKHz: List<Int>, level: Int): Int {
-        if (freqsKHz.isEmpty()) return 0
-        val idx = (freqsKHz.size - 1 - level).coerceIn(0, freqsKHz.lastIndex)
-        return freqsKHz[idx]
-    }
 
     internal fun parseHzToKHz(raw: String?): List<Int> =
         raw.orEmpty()
@@ -96,4 +78,14 @@ class GpuFreqDetector(
 
     private fun readText(path: String): String? =
         privilegedReader.readText(path)?.trim()?.takeIf { it.isNotEmpty() }
+}
+
+/**
+ * Maps a power-level index to a frequency in kHz. [freqsKHz] is ascending, while power
+ * levels are fastest-first, so level i corresponds to the (N-1-i)th ascending entry.
+ */
+internal fun freqForLevel(freqsKHz: List<Int>, level: Int): Int {
+    if (freqsKHz.isEmpty()) return 0
+    val idx = (freqsKHz.size - 1 - level).coerceIn(0, freqsKHz.lastIndex)
+    return freqsKHz[idx]
 }

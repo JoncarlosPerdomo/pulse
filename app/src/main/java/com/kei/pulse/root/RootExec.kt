@@ -7,7 +7,8 @@ import java.nio.charset.Charset
 
 class RootExec {
 
-    val pServerAvailable: Boolean = PServerBinder.get() != null
+    val pServerAvailable: Boolean
+        get() = PServerBinder.get() != null
 
     fun executeAsRoot(cmd: String): Result<String?> {
         val binder = PServerBinder.get() ?: return Result.failure(IllegalStateException("PServer not available"))
@@ -37,6 +38,7 @@ class RootExec {
 /**
  * Process-wide handle to the vendor `PServerBinder`. Looked up again whenever it is missing or dead:
  * `pservice` is an init service that restarts after a crash and registers a new binder.
+ * Observed on the AYN Thor: https://github.com/JoncarlosPerdomo/pulse/pull/2
  */
 @SuppressLint("DiscouragedPrivateApi", "PrivateApi")
 private object PServerBinder {
