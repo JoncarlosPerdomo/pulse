@@ -1,10 +1,9 @@
 import java.util.Properties
 
 plugins {
-    id("com.android.application")
-    id("org.jetbrains.kotlin.android")
-    id("org.jetbrains.kotlin.plugin.compose")
-    id("org.jetbrains.kotlin.plugin.serialization")
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
 }
 
 val localProperties = Properties().apply {
@@ -29,19 +28,16 @@ val hasReleaseSigningConfig = listOf(
 
 android {
     namespace = "com.kei.pulse"
-    compileSdk = 34
+    compileSdk {
+        version = release(37)
+    }
 
     defaultConfig {
         applicationId = "com.kei.pulse"
         minSdk = 31
-        targetSdk = 34
+        targetSdk = 36
         versionCode = 303
         versionName = "1.19.6"
-
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        vectorDrawables {
-            useSupportLibrary = true
-        }
     }
 
     signingConfigs {
@@ -63,7 +59,8 @@ android {
         }
 
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             if (hasReleaseSigningConfig) {
                 signingConfig = signingConfigs.getByName("release")
             }
@@ -79,20 +76,15 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     lint {
         // Quiet non-actionable advisories so lintDebug stays clean and meaningful:
         //  - dependency/SDK/Gradle "newer version available" — deps are deliberately pinned for stability
-        //  - OldTargetApi — targetSdk 34 is intentional (see CLAUDE.md)
         //  - ObsoleteSdkInt — harmless dead version guards under minSdk 31
         //  - UseKtx (style) / DataExtractionRules (allowBackup=true is intentional)
         // Real-bug checks (UnusedResources, SetWorldReadable, DefaultLocale, …) stay ON.
         disable += setOf(
             "GradleDependency", "NewerVersionAvailable", "AndroidGradlePluginVersion",
-            "OldTargetApi", "ObsoleteSdkInt", "UseKtx", "DataExtractionRules",
+            "ObsoleteSdkInt", "UseKtx", "DataExtractionRules",
         )
     }
 
@@ -107,35 +99,25 @@ android {
 }
 
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2024.09.03")
+    implementation(platform(libs.compose.bom))
+    implementation(libs.compose.ui)
+    implementation(libs.compose.material3)
+    implementation(libs.compose.material.icons.extended)
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.datastore.preferences)
+    implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.kotlinx.serialization.json)
 
-    implementation("androidx.core:core-ktx:1.13.1")
-    implementation("androidx.activity:activity-compose:1.9.2")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.6")
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.6")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.6")
-    implementation("androidx.datastore:datastore-preferences:1.1.1")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
-    implementation(composeBom)
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
-    implementation("com.google.android.material:material:1.12.0")
-
-    debugImplementation(composeBom)
-    debugImplementation("androidx.compose.ui:ui-tooling")
-    debugImplementation("androidx.compose.ui:ui-test-manifest")
-
-    testImplementation("junit:junit:4.13.2")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
 }
 
 // Forward -Dreplay.logcat=<path> to the unit-test JVM so AutoTdpReplayTest.adHocReplayOfASharedCapture can
 // replay an arbitrary PulseAutoTdp capture on demand. Only set when provided, so the test's assumeTrue(...)
 // skips it otherwise.
 tasks.withType<Test>().configureEach {
-    System.getProperty("replay.logcat")?.let { systemProperty("replay.logcat", it) }
+    providers.systemProperty("replay.logcat").orNull?.let { systemProperty("replay.logcat", it) }
 }

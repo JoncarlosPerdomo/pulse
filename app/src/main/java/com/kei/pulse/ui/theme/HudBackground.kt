@@ -744,8 +744,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawRoninInk(
 private fun leafPathInto(path: Path, cx: Float, cy: Float, size: Float): Path {
     path.rewind()
     path.moveTo(cx, cy - size)
-    path.quadraticBezierTo(cx + size * 0.62f, cy, cx, cy + size)
-    path.quadraticBezierTo(cx - size * 0.62f, cy, cx, cy - size)
+    path.quadraticTo(cx + size * 0.62f, cy, cx, cy + size)
+    path.quadraticTo(cx - size * 0.62f, cy, cx, cy - size)
     path.close()
     return path
 }
