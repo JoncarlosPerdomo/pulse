@@ -3,6 +3,8 @@ package com.kei.pulse
 import android.content.Context
 import com.kei.pulse.data.BundledProfileProvider
 import com.kei.pulse.data.CpuPolicyDetector
+import com.kei.pulse.data.DataStoreTuningStore
+import com.kei.pulse.data.GlobalTuning
 import com.kei.pulse.data.GovernorController
 import com.kei.pulse.data.GpuFreqDetector
 import com.kei.pulse.data.PerAppConfigStorage
@@ -10,9 +12,12 @@ import com.kei.pulse.data.PerformanceRepository
 import com.kei.pulse.data.PrivilegedSysfsReader
 import com.kei.pulse.data.ProfileStorage
 import com.kei.pulse.data.SettingsStorage
+import com.kei.pulse.model.ClockOwnership
+import com.kei.pulse.root.PServerShell
 import com.kei.pulse.root.PerformanceCommandBuilder
 import com.kei.pulse.root.PServerSysfsReader
 import com.kei.pulse.root.RootCommandRunner
+import kotlinx.coroutines.sync.Mutex
 
 class AppContainer(context: Context) {
     private val appContext = context.applicationContext
@@ -29,6 +34,10 @@ class AppContainer(context: Context) {
         PServerSysfsReader(appContext)
     }
 
+    private val profileStorage: ProfileStorage by lazy {
+        ProfileStorage(appContext)
+    }
+
     val repository: PerformanceRepository by lazy {
         PerformanceRepository(
             detector = CpuPolicyDetector(
@@ -38,10 +47,28 @@ class AppContainer(context: Context) {
                 ),
             ),
             bundledProfileProvider = BundledProfileProvider(appContext),
-            profileStorage = ProfileStorage(appContext),
+            profileStorage = profileStorage,
             commandBuilder = PerformanceCommandBuilder(),
             rootCommandRunner = RootCommandRunner(appContext),
             governorController = GovernorController(),
         )
+    }
+
+    val globalTuning: GlobalTuning by lazy {
+        GlobalTuning(
+            store = DataStoreTuningStore(settingsStorage, profileStorage),
+            caps = repository,
+            shell = PServerShell,
+            ownership = { activeClockOwnership ?: ClockOwnership.FREE },
+            mutex = globalTuningMutex,
+        )
+    }
+
+    companion object {
+        /** Set by the foreground-app watcher while it runs; null when it isn't. */
+        @Volatile
+        var activeClockOwnership: ClockOwnership? = null
+
+        private val globalTuningMutex = Mutex()
     }
 }

@@ -3,10 +3,8 @@ package com.kei.pulse.model
 import kotlin.math.abs
 
 /**
- * The Power Target's %→frequency-map computation — the SINGLE source shared by the in-app Custom slider
- * (TunerViewModel.applyPowerTargetValues) and the Quick Access bar's live apply (ForegroundAppMonitorService,
- * where a ViewModel isn't constructable). Pure: policies in, per-policy snapped target frequencies out; both
- * surfaces then feed the result to the same PerformanceRepository.applyValues(persistAsCustom = true).
+ * The Power Target's %→frequency-map computation, used by [com.kei.pulse.data.GlobalTuning].
+ * Pure: policies in, per-policy snapped target frequencies out.
  */
 object PowerTargetMath {
 

@@ -48,6 +48,7 @@ class MainActivity : ComponentActivity() {
             repository = container.repository,
             settingsStorage = container.settingsStorage,
             telemetryReader = TelemetryReader(container.sysfsReader),
+            globalTuning = container.globalTuning,
             perAppConfigStorage = container.perAppConfigStorage,
         )
     }

@@ -6,8 +6,10 @@ import androidx.lifecycle.viewModelScope
 import com.kei.pulse.data.DisplayController
 import com.kei.pulse.data.GovernorController
 import com.kei.pulse.data.GovernorOption
-import com.kei.pulse.data.AutoTuneController
-import com.kei.pulse.data.CpuFloorController
+import com.kei.pulse.data.FailureReason
+import com.kei.pulse.data.GlobalTuning
+import com.kei.pulse.data.SideControlEdit
+import com.kei.pulse.data.TuningOutcome
 import com.kei.pulse.data.GpuFloorController
 import com.kei.pulse.data.RefreshRateController
 import com.kei.pulse.data.TelemetryReader
@@ -28,9 +30,6 @@ import com.kei.pulse.model.AppColorSource
 import com.kei.pulse.model.AppSettings
 import com.kei.pulse.model.AutoTdpBias
 import com.kei.pulse.model.CpuPolicyInfo
-import com.kei.pulse.model.CustomTuning
-import com.kei.pulse.model.SideControlState
-import com.kei.pulse.model.TierTransition
 import com.kei.pulse.model.PerformanceProfile
 import com.kei.pulse.model.PowerTier
 import com.kei.pulse.model.ProfileStateResolver
@@ -41,6 +40,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -52,6 +53,7 @@ class TunerViewModel(
     private val repository: PerformanceRepository,
     private val settingsStorage: SettingsStorage,
     private val telemetryReader: TelemetryReader,
+    private val globalTuning: GlobalTuning,
     private val perAppConfigStorage: PerAppConfigStorage? = null,
 ) : ViewModel() {
 
@@ -152,44 +154,43 @@ class TunerViewModel(
     private val governorController = GovernorController()
     private val refreshRateController = RefreshRateController()
     private val gpuFloorController = GpuFloorController()
-    private val cpuFloorController = CpuFloorController()
 
     private val _governor = MutableStateFlow<String?>(null)
     val governor: StateFlow<String?> = _governor
     private val _refreshRate = MutableStateFlow<Int?>(null)
     val refreshRate: StateFlow<Int?> = _refreshRate
-    private val _gpuFloorPercent = MutableStateFlow(0)
-    val gpuFloorPercent: StateFlow<Int> = _gpuFloorPercent
-    private val _cpuFloorPercent = MutableStateFlow(0)
-    val cpuFloorPercent: StateFlow<Int> = _cpuFloorPercent
+
+    private fun <T> setting(pick: (AppSettings) -> T): StateFlow<T> =
+        settings.map(pick).distinctUntilChanged()
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), pick(AppSettings()))
+
+    val gpuFloorPercent: StateFlow<Int> = setting { it.gpuFloorPercent }
+    val cpuFloorPercent: StateFlow<Int> = setting { it.cpuFloorPercent }
+    val powerTargetEnabled: StateFlow<Boolean> = setting { it.powerTargetEnabled }
+    val powerTargetPercent: StateFlow<Int> = setting { it.powerTargetPercent }
+    val powerTargetCpuOnly: StateFlow<Boolean> = setting { it.powerTargetCpuOnly }
+    val gpuLocked: StateFlow<Boolean> = setting { it.gpuLocked }
+    val primeCoreBoostLimited: StateFlow<Boolean> = setting { it.primeCoreBoostLimited }
+
+    /** The persisted Tier, shown as Custom while a named display profile is the last thing applied. */
+    val activeTier: StateFlow<PowerTier> = combine(settings, state) { s, snap ->
+        val namedProfileApplied = snap.lastAppliedDisplayProfileId
+            ?.let { it != ProfileStateResolver.MANUAL_PROFILE_ID } == true
+        if (namedProfileApplied) PowerTier.CUSTOM else tierOf(s)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), PowerTier.CUSTOM)
+
+    private fun tierOf(s: AppSettings): PowerTier =
+        PowerTier.entries.firstOrNull { it.label == s.activeTierLabel } ?: PowerTier.CUSTOM
+
     fun setCpuFloorPercent(percent: Int) {
         viewModelScope.launch {
-            val ok = withContext(Dispatchers.IO) { cpuFloorController.setFloor(state.value.policies, percent) }
-            applySideControls(TierTransition.afterCpuFloor(currentSideControls(), percent))
-            transientMessage.value = if (percent <= 0) "CPU floor cleared" else "CPU floor set to ~$percent%"
-            transientError.value = if (ok) null else "Couldn't set CPU floor"
-            persistTuning()
+            report(
+                globalTuning.edit(SideControlEdit.CpuFloor(percent)),
+                applied = if (percent <= 0) "CPU floor cleared" else "CPU floor set to ~$percent%",
+                failed = "Couldn't set CPU floor",
+            )
         }
     }
-
-    private val _powerTargetEnabled = MutableStateFlow(false)
-    val powerTargetEnabled: StateFlow<Boolean> = _powerTargetEnabled
-    private val _powerTargetPercent = MutableStateFlow(100)
-    val powerTargetPercent: StateFlow<Int> = _powerTargetPercent
-    private val _powerTargetCpuOnly = MutableStateFlow(false)
-    val powerTargetCpuOnly: StateFlow<Boolean> = _powerTargetCpuOnly
-    private val _gpuLocked = MutableStateFlow(false)
-    val gpuLocked: StateFlow<Boolean> = _gpuLocked
-
-    private val _primeCoreBoostLimited = MutableStateFlow(false)
-    val primeCoreBoostLimited: StateFlow<Boolean> = _primeCoreBoostLimited
-
-    // Declared up here (not with the other system-control flows lower down) because the constructor's
-    // settings/state collectors read `_activeTier.value` synchronously on first emission (viewModelScope uses
-    // Dispatchers.Main.immediate, so a cached settings emission runs during construction). A later declaration
-    // left it null at that point → intermittent startup NullPointerException.
-    private val _activeTier = MutableStateFlow(PowerTier.CUSTOM)
-    val activeTier: StateFlow<PowerTier> = _activeTier
 
     private val _autoTdpDefault = MutableStateFlow(false)
     val autoTdpDefault: StateFlow<Boolean> = _autoTdpDefault
@@ -233,12 +234,7 @@ class TunerViewModel(
             if (enabled) {
                 releaseManualCapsToStock()
             } else {
-                // Disabling hands the clocks back to the active manual tier. Enabling RELEASED the caps to
-                // stock, so disabling must RE-APPLY the tier — otherwise the clocks stay wide open (e.g. a
-                // Power Target 69% is lost) and the current-values readout shows full clocks until the user
-                // re-nudges the tier (reported bug). Reuses the same restore path as clicking the active tier
-                // (which already re-applies the Power Target — see [applyTier]).
-                applyTier(_activeTier.value)
+                reportSwitch(tierOf(settingsStorage.settings.first()), globalTuning.reapply())
             }
             onSaved()
         }
@@ -303,80 +299,42 @@ class TunerViewModel(
 
     fun setPrimeCoreBoostLimited(limited: Boolean) {
         viewModelScope.launch {
-            val policies = state.value.policies
-            // Prime = the CPU policy with the highest max freq (same rule used everywhere; never policy-id).
-            val prime = policies.filterNot { it.isGpu }.maxByOrNull { it.selectableMaxFreq }
-                ?: run { transientError.value = "No Prime core found"; return@launch }
-            val freqs = prime.supportedFrequencies
-            val targetKHz = if (limited) {
-                freqs.getOrNull(freqs.size - 2) ?: freqs.last()
-            } else {
-                state.value.currentValues[prime.id] ?: prime.selectableMaxFreq
-            }
-            // Route through applyFreqsToDevice so the prime's scaling_min is lowered + 444-locked BEFORE its
-            // max is written (the proven cap path). A raw max-only write leaves the daemon-pinned prime min in
-            // place, so a future sub-min no-turbo target would be rejected (max < min); lowering the min first
-            // makes any target hold. Pass the FULL policy list so applyFreqsToDevice identifies the prime, but
-            // only the prime id is in the map, so no other cluster is touched.
-            withContext(Dispatchers.IO) {
-                AutoTuneController.applyFreqsToDevice(policies, mapOf(prime.id to targetKHz))
-            }
-            applySideControls(TierTransition.afterPrimeBoost(currentSideControls(), limited))
-            transientMessage.value = if (limited) "Prime boost limited" else "Prime boost restored"
-            persistTuning()
+            report(
+                globalTuning.edit(SideControlEdit.PrimeBoost(limited)),
+                applied = if (limited) "Prime boost limited" else "Prime boost restored",
+                failed = "No Prime core found",
+            )
         }
     }
 
     fun setPowerTargetCpuOnly(enabled: Boolean) {
-        _powerTargetCpuOnly.value = enabled
-        if (_powerTargetEnabled.value) applyPowerTarget(_powerTargetPercent.value)
-        persistTuning()
+        viewModelScope.launch {
+            report(
+                globalTuning.edit(SideControlEdit.PowerTargetCpuOnly(enabled)),
+                applied = powerTargetMessage(),
+                failed = "Failed to set power target",
+            )
+        }
     }
 
     fun setGpuLocked(locked: Boolean) {
-        val gpu = state.value.policies.firstOrNull { it.isGpu }
-        if (gpu == null) {
-            transientError.value = "No GPU detected"
-            return
-        }
-        val freqs = gpu.supportedFrequencies
-        val n = freqs.size
         viewModelScope.launch {
-            if (locked) {
-                val pinned = withContext(Dispatchers.IO) { gpuFloorController.lockToCurrentCap(gpu.policyPath) }
-                // Lock clears the GPU floor (the interlink rule, now a single tested source of truth).
-                applySideControls(TierTransition.afterGpuLock(currentSideControls(), locked = true))
-                transientMessage.value = if (pinned != null) {
-                    val mhz = freqs.getOrNull(n - 1 - pinned)?.div(1000)
-                    if (mhz != null) "GPU locked at $mhz MHz" else "GPU locked (level $pinned)"
-                } else {
-                    "Couldn't read the GPU clock to lock"
-                }
-            } else {
-                withContext(Dispatchers.IO) {
-                    gpuFloorController.setFloorLevel(gpu.policyPath, (n - 1).coerceAtLeast(0))
-                }
-                applySideControls(TierTransition.afterGpuLock(currentSideControls(), locked = false))
-                transientMessage.value = "GPU unlocked"
+            val outcome = globalTuning.edit(SideControlEdit.GpuLock(locked))
+            val pinned = (outcome as? TuningOutcome.Applied)?.gpuLockLevel
+            val freqs = state.value.policies.firstOrNull { it.isGpu }?.supportedFrequencies.orEmpty()
+            val message = when {
+                !locked -> "GPU unlocked"
+                pinned == null -> "Couldn't read the GPU clock to lock"
+                else -> freqs.getOrNull(freqs.size - 1 - pinned)?.div(1000)
+                    ?.let { "GPU locked at $it MHz" } ?: "GPU locked (level $pinned)"
             }
-            transientError.value = null
-            persistTuning()
+            report(outcome, applied = message, failed = "No GPU detected")
         }
     }
 
     init {
         viewModelScope.launch {
             val persisted = settingsStorage.settings.first()
-            _powerTargetEnabled.value = persisted.powerTargetEnabled
-            _powerTargetPercent.value = persisted.powerTargetPercent
-            _powerTargetCpuOnly.value = persisted.powerTargetCpuOnly
-            _gpuLocked.value = persisted.gpuLocked
-            _gpuFloorPercent.value = persisted.gpuFloorPercent
-            _cpuFloorPercent.value = persisted.cpuFloorPercent
-            // Restore the active tier so the UI doesn't always reset to Custom
-            PowerTier.entries.firstOrNull { it.label == persisted.activeTierLabel }
-                ?.let { _activeTier.value = it }
-            _primeCoreBoostLimited.value = persisted.primeCoreBoostLimited
             _learnedPeakW.value = persisted.learnedPeakW
             _autoTdpDefault.value = persisted.autoTdpDefaultEnabled
             _autoTdpFpsTarget.value = persisted.autoTdpFpsTarget
@@ -396,18 +354,6 @@ class TunerViewModel(
                     ?.let { perAppConfigStorage.persistBatteryCapacityWh(it) }
             }
         }
-        // When a named profile is applied (not a tier/manual slot), clear the highlighted tier.
-        viewModelScope.launch {
-            state.collect { snap ->
-                val lastApplied = snap.lastAppliedDisplayProfileId
-                if (lastApplied != null &&
-                    lastApplied != ProfileStateResolver.MANUAL_PROFILE_ID &&
-                    _activeTier.value != PowerTier.CUSTOM
-                ) {
-                    _activeTier.value = PowerTier.CUSTOM
-                }
-            }
-        }
         // Keep the settings-backed UI state in sync with the persisted settings, so a change made ELSEWHERE
         // (the QS tile, and now the Quick Access bar) reflects in the app UI without a restart. Without this,
         // turning AutoTDP off elsewhere left the tiers locked; the bar's global fps edit showed stale in the
@@ -416,11 +362,6 @@ class TunerViewModel(
         // diff-guards also keep a persist echo of the VM's own setter from re-firing anything.
         viewModelScope.launch {
             settingsStorage.settings.collect { s ->
-                val tier = PowerTier.entries.firstOrNull { it.label == s.activeTierLabel }
-                    ?: PowerTier.CUSTOM
-                if (_activeTier.value != tier) {
-                    _activeTier.value = tier
-                }
                 if (_autoTdpDefault.value != s.autoTdpDefaultEnabled) {
                     _autoTdpDefault.value = s.autoTdpDefaultEnabled
                 }
@@ -433,104 +374,64 @@ class TunerViewModel(
                 if (_autoTdpAggressivePark.value != s.autoTdpAggressivePark) {
                     _autoTdpAggressivePark.value = s.autoTdpAggressivePark
                 }
-                // The bar's Custom Power Target writes these too now — mirror them like the rest.
-                if (_powerTargetEnabled.value != s.powerTargetEnabled) {
-                    _powerTargetEnabled.value = s.powerTargetEnabled
-                }
-                if (_powerTargetPercent.value != s.powerTargetPercent) {
-                    _powerTargetPercent.value = s.powerTargetPercent
-                }
             }
         }
     }
 
-    private fun persistTuning() {
-        viewModelScope.launch {
-            settingsStorage.persistTuningState(
-                powerTargetEnabled = _powerTargetEnabled.value,
-                powerTargetPercent = _powerTargetPercent.value,
-                powerTargetCpuOnly = _powerTargetCpuOnly.value,
-                gpuLocked = _gpuLocked.value,
-                gpuFloorPercent = _gpuFloorPercent.value,
-                cpuFloorPercent = _cpuFloorPercent.value,
-                activeTierLabel = _activeTier.value.label,
-                primeCoreBoostLimited = _primeCoreBoostLimited.value,
-            )
-            // Snapshot the tuning knobs only while Custom is the active tier. Preset applies set
-            // the tier to the preset before calling this, so they can't overwrite the Custom
-            // memory — which is exactly what lets cycling back to Custom restore it intact.
-            if (_activeTier.value == PowerTier.CUSTOM) {
-                settingsStorage.persistCustomTuning(
-                    CustomTuning(
-                        powerTargetEnabled = _powerTargetEnabled.value,
-                        powerTargetPercent = _powerTargetPercent.value,
-                        powerTargetCpuOnly = _powerTargetCpuOnly.value,
-                        gpuLocked = _gpuLocked.value,
-                        gpuFloorPercent = _gpuFloorPercent.value,
-                        cpuFloorPercent = _cpuFloorPercent.value,
-                        primeCoreBoostLimited = _primeCoreBoostLimited.value,
-                        // _governor holds the raw kernel name; store the option label so it
-                        // round-trips back to an OPTIONS entry on restore.
-                        governorLabel = GovernorController.optionForGovernor(_governor.value)?.label,
-                    ),
-                )
+    private fun powerTargetMessage(): String? =
+        settings.value.takeIf { it.powerTargetEnabled }?.let { "Power target set to ${it.powerTargetPercent}%" }
+
+    private fun report(outcome: TuningOutcome, applied: String?, failed: String) {
+        when (outcome) {
+            is TuningOutcome.Applied -> {
+                outcome.governor?.let { _governor.value = it }
+                val caps = outcome.caps
+                transientMessage.value = if (caps != null && !caps.verificationPassed) {
+                    buildVerificationFailureMessage(state.value, caps.actualValues, caps.commandOutput)
+                } else {
+                    applied ?: transientMessage.value
+                }
+                transientError.value = null
             }
+            TuningOutcome.Deferred -> {
+                transientMessage.value = "Saved — a game owns the clocks right now"
+                transientError.value = null
+            }
+            TuningOutcome.Blocked -> transientError.value = "A game owns the clocks — Tier not changed"
+            is TuningOutcome.Failed -> transientError.value = outcome.message ?: failed
         }
+    }
+
+    private fun reportSwitch(tier: PowerTier, outcome: TuningOutcome) {
+        if (tier == PowerTier.CUSTOM && outcome is TuningOutcome.Failed &&
+            outcome.reason == FailureReason.NO_SAVED_CUSTOM
+        ) {
+            return
+        }
+        val applied = if (tier == PowerTier.CUSTOM) "Restored Custom" else "Applied ${tier.label}"
+        report(outcome, applied = applied, failed = "Failed to apply ${tier.label}")
     }
 
     fun setPowerTargetEnabled(enabled: Boolean) {
-        applySideControls(TierTransition.afterPowerTargetEnabled(currentSideControls(), enabled))
-        if (enabled) {
-            _activeTier.value = PowerTier.CUSTOM
-            applyPowerTarget(_powerTargetPercent.value)
+        viewModelScope.launch {
+            val percent = settings.value.powerTargetPercent
+            report(
+                globalTuning.edit(SideControlEdit.PowerTarget(enabled, percent)),
+                applied = if (enabled) "Power target set to $percent%" else null,
+                failed = "Failed to set power target",
+            )
         }
-        persistTuning()
     }
 
     fun setPowerTargetPercent(percent: Int) {
-        _powerTargetPercent.value = percent
-        if (_powerTargetEnabled.value) applyPowerTarget(percent)
-        persistTuning()
-    }
-
-    private fun applyPowerTarget(percent: Int) {
-        viewModelScope.launch { applyPowerTargetValues(percent) }
-    }
-
-    /**
-     * Compute + apply the Power Target's CPU caps (GPU left at full range when CPU-only) and persist them as the
-     * Custom map. Suspends so callers can sequence it — e.g. restoring a Power-Target-governed Custom needs the
-     * target re-applied in order, not fired-and-forgotten.
-     */
-    private suspend fun applyPowerTargetValues(percent: Int) {
-        val snapshot = state.value
-        if (snapshot.policies.isEmpty()) return
-        // Shared with the Quick Access bar's live apply — one math, one behavior (PowerTargetMathTest pins it).
-        val values = com.kei.pulse.model.PowerTargetMath.capsForPercent(
-            snapshot.policies,
-            percent,
-            cpuOnly = _powerTargetCpuOnly.value,
-        )
-        edits.value = emptyMap()
-        val result = repository.applyValues(
-            policies = snapshot.policies,
-            selectedValues = values,
-            isReset = percent >= 100,
-            appliedDisplayProfileId = ProfileStateResolver.MANUAL_PROFILE_ID,
-            persistAsCustom = true,
-        )
-        result.onSuccess { outcome ->
-            _activeTier.value = PowerTier.CUSTOM
-            transientMessage.value = if (outcome.verificationPassed) {
-                "Power target set to $percent%"
-            } else {
-                buildVerificationFailureMessage(snapshot, outcome.actualValues, outcome.commandOutput)
-            }
-            transientError.value = null
-        }.onFailure { throwable ->
-            transientError.value = throwable.message ?: "Failed to set power target"
+        viewModelScope.launch {
+            val enabled = settings.value.powerTargetEnabled
+            report(
+                globalTuning.edit(SideControlEdit.PowerTarget(enabled, percent)),
+                applied = if (enabled) "Power target set to $percent%" else null,
+                failed = "Failed to set power target",
+            )
         }
-        reapplyGpuLock()
     }
 
     private val _fanMode = MutableStateFlow<Int?>(null)
@@ -588,15 +489,7 @@ class TunerViewModel(
 
     fun setGovernor(option: GovernorOption) {
         viewModelScope.launch {
-            val chosen = withContext(Dispatchers.IO) {
-                governorController.setGovernor(state.value.policies, option)
-            }
-            if (chosen != null) _governor.value = chosen
-            // A manual chip pick while in Custom is remembered, so cycling back restores it.
-            if (chosen != null && _activeTier.value == PowerTier.CUSTOM) persistTuning()
-            transientMessage.value =
-                if (chosen != null) "CPU governor: ${option.label}" else "Couldn't set governor"
-            transientError.value = null
+            report(globalTuning.edit(SideControlEdit.Governor(option)), applied = "CPU governor: ${option.label}", failed = "Couldn't set governor")
         }
     }
 
@@ -610,67 +503,12 @@ class TunerViewModel(
     }
 
     fun setGpuFloorPercent(percent: Int) {
-        val gpu = state.value.policies.firstOrNull { it.isGpu }
-        if (gpu == null) {
-            transientError.value = "No GPU detected"
-            return
-        }
         viewModelScope.launch {
-            val floorLevel = gpuFloorLevelFor(gpu, percent)
-            withContext(Dispatchers.IO) { gpuFloorController.setFloorLevel(gpu.policyPath, floorLevel) }
-            applySideControls(TierTransition.afterGpuFloor(currentSideControls(), percent))
-            transientMessage.value = if (percent <= 0) "GPU floor cleared" else "GPU floor set to ~$percent%"
-            transientError.value = null
-            persistTuning()
-        }
-    }
-
-    /** GPU power-level index (0 = fastest) for a floor percentage; widest level when cleared. */
-    private fun gpuFloorLevelFor(gpu: CpuPolicyInfo, percent: Int): Int {
-        val asc = gpu.supportedFrequencies
-        val n = asc.size
-        if (percent <= 0 || asc.isEmpty()) return (n - 1).coerceAtLeast(0)
-        val targetFreq = gpu.selectableMaxFreq * percent / 100
-        val pos = asc.indices.minByOrNull { kotlin.math.abs(asc[it] - targetFreq) } ?: 0
-        return (n - 1 - pos).coerceIn(0, (n - 1).coerceAtLeast(0))
-    }
-
-    /**
-     * Re-apply the Custom min-side controls that a preset apply releases. The max-side caps
-     * (manual freqs, Power Target, prime boost) are already restored via the saved frequency map;
-     * GPU min_pwrlevel gets widened by any apply, so a lock/floor must be re-pinned here.
-     */
-    private suspend fun reapplyCustomSideControls(tuning: CustomTuning) {
-        val policies = state.value.policies
-        val gpu = policies.firstOrNull { it.isGpu }
-        withContext(Dispatchers.IO) {
-            if (gpu != null) {
-                when {
-                    tuning.gpuLocked -> gpuFloorController.lockToCurrentCap(gpu.policyPath)
-                    tuning.gpuFloorPercent > 0 ->
-                        gpuFloorController.setFloorLevel(gpu.policyPath, gpuFloorLevelFor(gpu, tuning.gpuFloorPercent))
-                }
-            }
-            if (tuning.cpuFloorPercent > 0) {
-                cpuFloorController.setFloor(policies, tuning.cpuFloorPercent)
-            }
-            // Prime Boost Limit only governs when NO Power Target caps the prime — otherwise the PT's (lower)
-            // prime cap must win. Without this gate the no-turbo write (e.g. 4204800) overwrites and 444-locks
-            // the prime scaling_max that applyPowerTargetValues just set (e.g. 3072000 @ 69%), so the prime
-            // reads back at 4.2 GHz instead of the Power Target value. PT governs the CPU clusters whenever it's
-            // on (CPU-only still caps the CPU; only the GPU is freed), so the boost limit is redundant there.
-            if (tuning.primeCoreBoostLimited && !tuning.powerTargetEnabled) {
-                val prime = policies.filterNot { it.isGpu }.maxByOrNull { it.selectableMaxFreq }
-                if (prime != null) {
-                    val freqs = prime.supportedFrequencies
-                    val target = freqs.getOrNull(freqs.size - 2) ?: freqs.last()
-                    // Route the no-turbo cap through the proven path: it lowers the prime min + 444-locks it
-                    // before writing the max, so the cap holds even if the no-turbo target ever drops below
-                    // the daemon's pinned min (a raw max-only write would be rejected, max < min). Full policy
-                    // list identifies the prime; only the prime id is written.
-                    AutoTuneController.applyFreqsToDevice(policies, mapOf(prime.id to target))
-                }
-            }
+            report(
+                globalTuning.edit(SideControlEdit.GpuFloor(percent)),
+                applied = if (percent <= 0) "GPU floor cleared" else "GPU floor set to ~$percent%",
+                failed = "No GPU detected",
+            )
         }
     }
 
@@ -840,136 +678,14 @@ class TunerViewModel(
     }
 
     fun applyTier(tier: PowerTier, onApplied: (String) -> Unit = {}) {
-        val snapshot = state.value
-        if (tier == PowerTier.CUSTOM) {
-            // Switching to Custom restores the user's last manual setup: the saved frequency map
-            // (max-side caps incl. Power Target / manual / prime boost) plus the tuning knobs that
-            // a preset apply clears or releases (Power Target toggle, GPU lock/floor, CPU floor).
-            viewModelScope.launch {
-                val tuning = settingsStorage.customTuning.first()
-                val result = repository.restoreCustomValues()
-                edits.value = emptyMap()
-                _activeTier.value = PowerTier.CUSTOM
-                // Restore every Custom side-control from the saved tuning via the unit-tested resolver
-                // (a saved field with no mapping there is a restoration bug, not a silent drop).
-                applySideControls(TierTransition.afterCustomRestore(tuning))
-                // A Power-Target-governed Custom must actually RE-APPLY the target, not just restore the saved
-                // value map — otherwise the prior preset's CPU freqs keep showing in the current-values readout
-                // until the PT slider is nudged (the reported bug). Mirrors the slider path, and re-persists the
-                // reduced map so any stale saved values self-heal.
-                if (tuning.powerTargetEnabled) applyPowerTargetValues(tuning.powerTargetPercent)
-                reapplyCustomSideControls(tuning)
-                // Restore the governor the user last set in Custom (if any).
-                tuning.governorLabel?.let { label ->
-                    GovernorController.OPTIONS.firstOrNull { it.label == label }?.let { option ->
-                        val chosen = withContext(Dispatchers.IO) {
-                            governorController.setGovernor(state.value.policies, option)
-                        }
-                        if (chosen != null) _governor.value = chosen
-                    }
-                }
-                persistTuning()
-                result.onSuccess {
-                    transientMessage.value = "Restored Custom"
-                    transientError.value = null
-                }
-                onApplied(PowerTier.CUSTOM.label)
-            }
-            return
-        }
-        if (snapshot.policies.isEmpty()) {
-            _activeTier.value = PowerTier.CUSTOM
-            persistTuning()
-            return
-        }
-        // Presets drive the CPU. Max/Balanced leave the GPU at full for gaming; only Power
-        // Saving eases the GPU back a notch (for media / light play).
-        val powerSaving = tier == PowerTier.POWER_SAVING
-        val cpuSorted = snapshot.policies.filterNot { it.isGpu }.sortedBy { it.id }
-        val primePolicyId = cpuSorted.lastOrNull()?.id
-        val values = snapshot.policies.associate { policy ->
-            val factor = when {
-                policy.isGpu && !powerSaving -> 1.0
-                policy.isGpu -> tier.gpuFactor
-                else -> tier.cpuFactor
-            }
-            val target = (policy.selectableMaxFreq * factor).toInt()
-            var snapped = policy.supportedFrequencies.minByOrNull { kotlin.math.abs(it - target) }
-                ?: policy.selectableMaxFreq
-            // Power Saving: limit the Prime cluster below its non-sustainable turbo bin
-            if (powerSaving && !policy.isGpu && policy.id == primePolicyId) {
-                val freqs = policy.supportedFrequencies
-                val noTurbo = freqs.getOrNull(freqs.size - 2) ?: freqs.last()
-                snapped = minOf(snapped, noTurbo)
-            }
-            policy.id to snapped
-        }
         edits.value = emptyMap()
         viewModelScope.launch {
-            val result = repository.applyValues(
-                policies = snapshot.policies,
-                selectedValues = values,
-                isReset = tier == PowerTier.MAX,
-                appliedDisplayProfileId = ProfileStateResolver.MANUAL_PROFILE_ID,
-            )
-            result.onSuccess { outcome ->
-                edits.value = emptyMap()
-                _activeTier.value = tier
-                // A preset is governed by the tier, so it CLEARS every Custom side-control (Power Target,
-                // GPU lock + floor, CPU floor, prime-boost limit). The cleared UI state is now the single
-                // unit-tested source of truth (TierTransition.afterPreset), so a clear can't silently be
-                // forgotten here again — that was the prime-boost Known Bug. Device releases are unchanged:
-                // the CPU floor is released on the node below (the cap apply writes only scaling_max, never
-                // the non-prime scaling_min the floor raised), and the GPU lock is re-evaluated by
-                // reapplyGpuLock() at the end of this apply.
-                applySideControls(TierTransition.afterPreset(currentSideControls()))
-                withContext(Dispatchers.IO) { cpuFloorController.setFloor(snapshot.policies, 0) }
-                // Re-assert the preset's smart-default governor (the vendor daemon resets it).
-                // Governors respect scaling_max_freq, so the caps just applied still hold.
-                tier.governorLabel?.let { label ->
-                    GovernorController.OPTIONS.firstOrNull { it.label == label }?.let { option ->
-                        val chosen = withContext(Dispatchers.IO) {
-                            governorController.setGovernor(snapshot.policies, option)
-                        }
-                        if (chosen != null) _governor.value = chosen
-                    }
-                }
-                persistTuning()
-                transientMessage.value = if (outcome.verificationPassed) {
-                    "Applied ${tier.label}"
-                } else {
-                    buildVerificationFailureMessage(snapshot, outcome.actualValues, outcome.commandOutput)
-                }
-                transientError.value = null
-                onApplied(tier.label)
-            }.onFailure { throwable ->
-                transientError.value = throwable.message ?: "Failed to apply ${tier.label}"
-            }
-            reapplyGpuLock()
+            val outcome = globalTuning.switchTo(tier)
+            reportSwitch(tier, outcome)
+            val switched = outcome is TuningOutcome.Applied ||
+                (outcome is TuningOutcome.Failed && outcome.reason == FailureReason.NO_SAVED_CUSTOM)
+            if (switched) onApplied(tier.label)
         }
-    }
-
-    /** The seven Custom side-control flags as a pure snapshot (input to [TierTransition.afterPreset]). */
-    private fun currentSideControls(): SideControlState = SideControlState(
-        powerTargetEnabled = _powerTargetEnabled.value,
-        powerTargetPercent = _powerTargetPercent.value,
-        powerTargetCpuOnly = _powerTargetCpuOnly.value,
-        gpuLocked = _gpuLocked.value,
-        gpuFloorPercent = _gpuFloorPercent.value,
-        cpuFloorPercent = _cpuFloorPercent.value,
-        primeCoreBoostLimited = _primeCoreBoostLimited.value,
-    )
-
-    /** Push a resolved side-control state onto the UI flows — the single place these flags are assigned
-     *  across tier transitions, so a transition can't clear/restore one but forget another. */
-    private fun applySideControls(s: SideControlState) {
-        _powerTargetEnabled.value = s.powerTargetEnabled
-        _powerTargetPercent.value = s.powerTargetPercent
-        _powerTargetCpuOnly.value = s.powerTargetCpuOnly
-        _gpuLocked.value = s.gpuLocked
-        _gpuFloorPercent.value = s.gpuFloorPercent
-        _cpuFloorPercent.value = s.cpuFloorPercent
-        _primeCoreBoostLimited.value = s.primeCoreBoostLimited
     }
 
     fun setPolicyValue(policy: CpuPolicyInfo, rawValue: Int) {
@@ -1051,7 +767,7 @@ class TunerViewModel(
 
     /** Apply widens GPU min_pwrlevel (un-pinning a lock); re-pin it if the lock is engaged. */
     private suspend fun reapplyGpuLock() {
-        if (!_gpuLocked.value) return
+        if (!settings.value.gpuLocked) return
         val gpu = state.value.policies.firstOrNull { it.isGpu } ?: return
         withContext(Dispatchers.IO) { gpuFloorController.lockToCurrentCap(gpu.policyPath) }
     }
@@ -1293,12 +1009,13 @@ class TunerViewModel(
             repository: PerformanceRepository,
             settingsStorage: SettingsStorage,
             telemetryReader: TelemetryReader,
+            globalTuning: GlobalTuning,
             perAppConfigStorage: PerAppConfigStorage? = null,
         ): ViewModelProvider.Factory {
             return object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    return TunerViewModel(repository, settingsStorage, telemetryReader, perAppConfigStorage) as T
+                    return TunerViewModel(repository, settingsStorage, telemetryReader, globalTuning, perAppConfigStorage) as T
                 }
             }
         }

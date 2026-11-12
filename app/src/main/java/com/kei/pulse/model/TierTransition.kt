@@ -1,13 +1,8 @@
 package com.kei.pulse.model
 
 /**
- * Pure, device-free resolver for the side-control UI state after a power-tier transition.
- *
- * These are the knobs that [com.kei.pulse.ui.TunerViewModel.applyTier] historically set by
- * hand-copying a scatter of `MutableStateFlow` assignments — the exact place state-restoration bugs
- * slip past a green build: a transition that releases/clears device tuning but forgets to mirror it
- * in the "current values" UI, leaving the readout diverged from real sysfs. Centralizing the
- * contract here makes those omissions a single, unit-tested source of truth.
+ * Pure, device-free resolver for the side-control state after a Tier transition or a side-control edit,
+ * used by [com.kei.pulse.data.GlobalTuning].
  *
  * Scope: the seven simple flag/value side-controls. The governor is restored via its own controller
  * path (it is not a plain flag), so it is intentionally not modeled here.
@@ -76,7 +71,7 @@ object TierTransition {
     fun afterGpuLock(current: SideControlState, locked: Boolean): SideControlState =
         if (locked) current.copy(gpuLocked = true, gpuFloorPercent = 0) else current.copy(gpuLocked = false)
 
-    /** After toggling Power Target on/off. The tier→Custom switch + cap apply stay in the ViewModel. */
+    /** After toggling Power Target on/off. */
     fun afterPowerTargetEnabled(current: SideControlState, enabled: Boolean): SideControlState =
         current.copy(powerTargetEnabled = enabled)
 

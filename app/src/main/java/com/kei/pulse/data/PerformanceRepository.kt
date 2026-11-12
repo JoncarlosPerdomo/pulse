@@ -47,7 +47,7 @@ class PerformanceRepository(
     private val commandBuilder: PerformanceCommandBuilder,
     private val rootCommandRunner: RootCommandRunner,
     private val governorController: GovernorController,
-) {
+) : CapWriter {
     companion object {
         @Volatile
         private var processCachedPolicies: List<CpuPolicyInfo> = emptyList()
@@ -176,7 +176,7 @@ class PerformanceRepository(
         }
         return applyValues(
             policies = policies,
-            selectedValues = tierFrequencies(tier, policies),
+            selectedValues = GlobalTuning.tierFrequencies(tier, policies),
             isReset = tier == PowerTier.MAX,
             appliedDisplayProfileId = ProfileStateResolver.MANUAL_PROFILE_ID,
         ).onSuccess {
@@ -272,6 +272,11 @@ class PerformanceRepository(
     /** Detected CPU+GPU policies (process-cached), e.g. for the overlay telemetry feed. */
     fun currentPolicies(): List<CpuPolicyInfo> = resolvePolicies()
 
+    override val isAvailable: Boolean
+        get() = rootCommandRunner.isAvailable
+
+    override fun policies(): List<CpuPolicyInfo> = resolvePolicies()
+
     /** Friendly SoC model string for display (e.g. overlay header); null if undetected. */
     fun socModel(): String? = bundledProfileProvider.currentSocModel()
 
@@ -312,25 +317,18 @@ class PerformanceRepository(
         )
     }
 
-    private fun tierFrequencies(tier: PowerTier, policies: List<CpuPolicyInfo>): Map<Int, Int> {
-        val powerSaving = tier == PowerTier.POWER_SAVING
-        val primePolicyId = policies.filterNot { it.isGpu }.sortedBy { it.id }.lastOrNull()?.id
-        return policies.associate { policy ->
-            val factor = when {
-                policy.isGpu && !powerSaving -> 1.0
-                policy.isGpu -> tier.gpuFactor
-                else -> tier.cpuFactor
-            }
-            val target = (policy.selectableMaxFreq * factor).toInt()
-            var snapped = policy.supportedFrequencies.minByOrNull { kotlin.math.abs(it - target) }
-                ?: policy.selectableMaxFreq
-            if (powerSaving && !policy.isGpu && policy.id == primePolicyId) {
-                val freqs = policy.supportedFrequencies
-                snapped = minOf(snapped, freqs.getOrNull(freqs.size - 2) ?: freqs.last())
-            }
-            policy.id to snapped
-        }
-    }
+    override suspend fun applyCaps(
+        policies: List<CpuPolicyInfo>,
+        values: Map<Int, Int>,
+        isReset: Boolean,
+        persistAsCustom: Boolean,
+    ): Result<ApplyOutcome> = applyValues(
+        policies = policies,
+        selectedValues = values,
+        isReset = isReset,
+        appliedDisplayProfileId = ProfileStateResolver.MANUAL_PROFILE_ID,
+        persistAsCustom = persistAsCustom,
+    )
 
     suspend fun applyValues(
         policies: List<CpuPolicyInfo>,
@@ -484,40 +482,6 @@ class PerformanceRepository(
             isReset = false,
             appliedDisplayProfileId = lastAppliedDisplayProfileId,
         )
-    }
-
-    suspend fun cycleTileProfile(): Result<PerformanceProfile> {
-        val state = observeState().first()
-        if (!state.isPServerAvailable || state.policies.isEmpty()) {
-            return Result.failure(IllegalStateException("Tile controls are unavailable"))
-        }
-
-        val cycleProfiles = state.displayProfiles.filter { profile ->
-            profile.source != ProfileSource.VIRTUAL || profile.id == ProfileStateResolver.STOCK_PROFILE_ID
-        }
-        if (cycleProfiles.isEmpty()) {
-            return Result.failure(IllegalStateException("No profiles available for tile cycling"))
-        }
-
-        val currentProfileId = state.lastAppliedDisplayProfileId
-            ?.takeIf { id -> cycleProfiles.any { profile -> profile.id == id } }
-            ?: state.activeDisplayProfileId
-        val currentIndex = cycleProfiles.indexOfFirst { it.id == currentProfileId }
-        val nextProfile = if (currentIndex == -1) {
-            cycleProfiles.first()
-        } else {
-            cycleProfiles[(currentIndex + 1) % cycleProfiles.size]
-        }
-
-        return applyValues(
-            policies = state.policies,
-            selectedValues = nextProfile.maxFrequencies,
-            isReset = nextProfile.id == ProfileStateResolver.STOCK_PROFILE_ID,
-            appliedDisplayProfileId = nextProfile.id,
-        ).map {
-            selectProfile(nextProfile.id.takeUnless { id -> id == ProfileStateResolver.STOCK_PROFILE_ID })
-            nextProfile
-        }
     }
 
     suspend fun createUserProfile(name: String, values: Map<Int, Int>) {

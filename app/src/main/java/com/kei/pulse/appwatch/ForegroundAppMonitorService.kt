@@ -22,6 +22,11 @@ import androidx.core.content.ContextCompat
 import android.media.AudioManager
 import androidx.core.content.getSystemService
 import com.kei.pulse.AppContainer
+import com.kei.pulse.data.SideControlEdit
+import com.kei.pulse.model.ClockOwner
+import com.kei.pulse.model.ClockOwnership
+import com.kei.pulse.model.ClockSession
+import com.kei.pulse.data.TuningOutcome
 import com.kei.pulse.MainActivity
 import com.kei.pulse.R
 import com.kei.pulse.data.AutoTuneController
@@ -194,7 +199,8 @@ class ForegroundAppMonitorService : Service() {
                 store.persistQuickAccessPerGameScope(next.quickAccessPerGameScope)
                 applyScopeCommit(action.perGame)
             }
-            is QuickAccessAction.SetPowerTarget -> applyQaPowerTarget(next.powerTargetPercent, next.powerTargetEnabled)
+            is QuickAccessAction.SetPowerTarget ->
+                container.globalTuning.edit(SideControlEdit.PowerTarget(next.powerTargetEnabled, next.powerTargetPercent))
             is QuickAccessAction.SetGpuCap -> applyQaGpuCap(action.freqKhz)
             is QuickAccessAction.SetBrightness, is QuickAccessAction.SetVolume -> Unit // global system, handled above
             is QuickAccessAction.ToggleAutoTdp, is QuickAccessAction.SetTier, is QuickAccessAction.SetStockMode,
@@ -236,9 +242,20 @@ class ForegroundAppMonitorService : Service() {
                 repushGlobalAutoTdp(QuickAccessScope.GlobalPerfField.PARK)
             }
             is QuickAccessAction.SetTier -> {
+                val autoTdpDefault = store.settings.first().autoTdpDefaultEnabled
                 store.persistAutoTdpDefaultEnabled(false)
-                store.persistActiveTierLabel(action.tier.label)
-                applyGlobalTier(action.tier)
+                when (val outcome = container.globalTuning.switchTo(action.tier)) {
+                    TuningOutcome.Blocked -> {
+                        store.persistAutoTdpDefaultEnabled(autoTdpDefault)
+                        showToast("PULSE · a game owns the clocks — ${action.tier.label} not applied")
+                    }
+                    is TuningOutcome.Failed -> showToast("PULSE · ${outcome.message ?: "couldn't apply ${action.tier.label}"}")
+                    is TuningOutcome.Applied ->
+                        if (outcome.caps?.verificationPassed == false) {
+                            showToast("PULSE · ${action.tier.label} applied, but the clocks didn't verify")
+                        }
+                    TuningOutcome.Deferred -> Unit
+                }
             }
             else -> Unit
         }
@@ -255,51 +272,6 @@ class ForegroundAppMonitorService : Service() {
         transitionMutex.withLock {
             val pkg = autoTdpPackage ?: return
             if (QuickAccessScope.receivesGlobalPerfEdit(boundConfig, field)) applyAutoTdpRegulation(pkg, boundConfig)
-        }
-    }
-
-    /**
-     * The Quick Access Power Target slider — the SACRED apply path, mirroring the in-app slider exactly:
-     * caps from the shared [com.kei.pulse.model.PowerTargetMath], applied via
-     * `repository.applyValues(persistAsCustom = true)`, and — the part the vendor daemon punishes you for
-     * skipping — [captureBoundReassertCaps] afterwards so the per-tick re-assert holds the NEW caps instead
-     * of stomping them back to the old ones. Persist mirrors the in-app persistTuning pair (live tuning state
-     * + the Custom side-control snapshot, so preset⟷Custom cycling restores the knob). While an AutoTDP
-     * session owns the clocks the device write is SKIPPED (persist-only) — AutoTDP re-asserts its own caps
-     * every tick and would fight any direct write.
-     */
-    private suspend fun applyQaPowerTarget(percent: Int, enabled: Boolean) {
-        val store = container.settingsStorage
-        val s = store.settings.first()
-        store.persistTuningState(
-            powerTargetEnabled = enabled,
-            powerTargetPercent = percent,
-            powerTargetCpuOnly = s.powerTargetCpuOnly,
-            gpuLocked = s.gpuLocked,
-            gpuFloorPercent = s.gpuFloorPercent,
-            cpuFloorPercent = s.cpuFloorPercent,
-            activeTierLabel = PowerTier.CUSTOM.label, // a Power Target edit is a Custom-tier edit, as in-app
-            primeCoreBoostLimited = s.primeCoreBoostLimited,
-        )
-        store.persistCustomTuning(
-            store.customTuning.first().copy(powerTargetEnabled = enabled, powerTargetPercent = percent),
-        )
-        transitionMutex.withLock {
-            if (autoTdpPackage != null) {
-                android.util.Log.i("PulseQA", "SetPowerTarget $percent% persisted only — AutoTDP owns the clocks")
-                return
-            }
-            val policies = ensurePolicies()
-            if (policies.isEmpty()) return
-            val values = com.kei.pulse.model.PowerTargetMath.capsForPercent(policies, percent, s.powerTargetCpuOnly)
-            container.repository.applyValues(
-                policies = policies,
-                selectedValues = values,
-                isReset = percent >= 100,
-                appliedDisplayProfileId = ProfileStateResolver.MANUAL_PROFILE_ID,
-                persistAsCustom = true,
-            )
-            if (boundPackage != null) captureBoundReassertCaps()
         }
     }
 
@@ -351,24 +323,6 @@ class ForegroundAppMonitorService : Service() {
             }
             QuickAccessScope.ScopeCommit.FlagOnly ->
                 android.util.Log.i("PulseQA", "ScopeCommit ${if (perGame) "PER-GAME" else "GLOBAL"}: flag only (pkg=$pkg)")
-        }
-    }
-
-    /**
-     * Apply a power tier device-wide (the set-and-leave main-UI path). NON-DESTRUCTIVE: when a game with its
-     * OWN per-app binding is foreground, only the persisted default changes — writing the device would just be
-     * stomped back by the bound game's cap re-assert ~2s later (a pure UI-vs-device divergence flicker). The
-     * tier lands when a following-global context is next active. A following-global AutoTDP session is stopped
-     * first so it doesn't fight the tier's caps.
-     */
-    private suspend fun applyGlobalTier(tier: PowerTier) {
-        transitionMutex.withLock {
-            if (boundPackage != null && !QuickAccessScope.followsGlobal(boundConfig)) return
-            if (autoTdpPackage != null) {
-                stopAutoTdp()
-                clearBoundReassert()
-            }
-            if (tier == PowerTier.CUSTOM) container.repository.restoreCustomValues() else container.repository.applyTier(tier)
         }
     }
 
@@ -526,7 +480,9 @@ class ForegroundAppMonitorService : Service() {
     @Volatile private var overlayLocked = true
     private var pollJob: Job? = null
     private var lastForeground: String? = null
+    @Volatile
     private var boundPackage: String? = null
+    @Volatile
     private var boundConfig: PerAppConfig? = null
     // Bug 9: the caps a non-AutoTDP per-app binding (saved Custom profile / power tier) actually wrote, held by
     // re-asserting them ~every 2s so the vendor game-boost daemon can't stomp them back up (AutoTDP already
@@ -559,12 +515,39 @@ class ForegroundAppMonitorService : Service() {
 
     // ── AutoTDP: dynamic CPU→GPU clock trimming that holds the game's refresh-rate FPS ──
     private val autoTune = AutoTuneController()
+    @Volatile
     private var autoTdpPackage: String? = null
     private var autoTdpTick = 0
     private var autoTdpLogTick = 0
 
+    private val clockSession = object : ClockSession {
+        override val owner: ClockOwner
+            get() = when {
+                boundPackage != null && !QuickAccessScope.followsGlobal(boundConfig) ->
+                    ClockOwner.BoundGame(autoTdp = autoTdpPackage != null)
+                autoTdpPackage != null -> ClockOwner.GlobalAutoTdp
+                else -> ClockOwner.Free
+            }
+
+        override suspend fun releaseGlobalAutoTdp() {
+            if (autoTdpPackage == null) return
+            stopAutoTdp()
+            clearBoundReassert()
+        }
+
+        override suspend fun capsWritten() {
+            if (boundPackage != null) captureBoundReassertCaps()
+        }
+    }
+
+    private val clockOwnership = object : ClockOwnership {
+        override suspend fun <T> withOwnership(block: suspend ClockSession.() -> T): T =
+            transitionMutex.withLock { clockSession.block() }
+    }
+
     override fun onCreate() {
         super.onCreate()
+        AppContainer.activeClockOwnership = clockOwnership
         createNotificationChannel()
         ServiceCompat.startForeground(
             this,
@@ -601,6 +584,7 @@ class ForegroundAppMonitorService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        if (AppContainer.activeClockOwnership === clockOwnership) AppContainer.activeClockOwnership = null
         overlay.hide()
         quickAccess.hide()
         comboJob?.cancel()
@@ -648,16 +632,18 @@ class ForegroundAppMonitorService : Service() {
             val cfg = foreground?.let { fg ->
                 container.perAppConfigStorage.configs.first().firstOrNull { it.packageName == fg }
             }
-            if (foreground != null && cfg != null) {
-                boundPackage = foreground
-                boundConfig = cfg
-                lastForeground = foreground
-                startOrResumeSession(foreground)
-                // Resume an AutoTDP binding without re-snapshotting (boundPackage is already set, so
-                // the pre-crash restore snapshot stands).
-                if (PerAppConfig.isAuto(cfg.profileBinding)) startAutoTdp(foreground, cfg)
-            } else {
-                transitionMutex.withLock { restoreSnapshot() }
+            transitionMutex.withLock {
+                if (foreground != null && cfg != null) {
+                    boundPackage = foreground
+                    boundConfig = cfg
+                    lastForeground = foreground
+                    startOrResumeSession(foreground)
+                    // Resume an AutoTDP binding without re-snapshotting (boundPackage is already set, so
+                    // the pre-crash restore snapshot stands).
+                    if (PerAppConfig.isAuto(cfg.profileBinding)) startAutoTdp(foreground, cfg)
+                } else {
+                    restoreSnapshot()
+                }
             }
         }
         while (serviceScope.isActive) {
@@ -734,7 +720,7 @@ class ForegroundAppMonitorService : Service() {
                 tick() // reads telemetry once (when active) and caches it for the draw-tracker + RGB below
                 trackDrawForBoundApp()
                 reassertManagedFan(settings)
-                reassertBoundCaps() // Bug 9: hold a Custom/tier binding's caps against the vendor game-boost daemon
+                transitionMutex.withLock { reassertBoundCaps() } // Bug 9: hold a Custom/tier binding's caps against the vendor game-boost daemon
                 updateRgb(settings)
             } catch (c: kotlinx.coroutines.CancellationException) {
                 throw c // never swallow cancellation — serviceScope.cancel() must still stop the loop
@@ -841,7 +827,7 @@ class ForegroundAppMonitorService : Service() {
             // Settings are fed REACTIVELY (below), not via a per-tick snapshot — the snapshot raced the optimistic
             // update and shoved a stale value back for a beat (the fan-mode "jumps back for a second" flicker).
             ensureQuickAccessSettingsFeed(quickAccessShouldShow)
-            if (autoActive) stepAutoTdp(policies, telemetry, fps)
+            if (autoActive) transitionMutex.withLock { if (autoTdpPackage != null) stepAutoTdp(policies, telemetry, fps) }
         } catch (t: Throwable) {
             android.util.Log.e("PulseOverlay", "overlay/auto tick failed", t)
         }
