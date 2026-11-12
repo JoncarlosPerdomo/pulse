@@ -398,6 +398,7 @@ class TunerViewModel(
                 transientMessage.value = "Saved — a game owns the clocks right now"
                 transientError.value = null
             }
+            TuningOutcome.Blocked -> transientError.value = "A game owns the clocks — Tier not changed"
             is TuningOutcome.Failed -> transientError.value = outcome.message ?: failed
         }
     }
@@ -685,8 +686,9 @@ class TunerViewModel(
         viewModelScope.launch {
             val outcome = globalTuning.switchTo(tier)
             reportSwitch(tier, outcome)
-            val failed = outcome is TuningOutcome.Failed && outcome.reason != FailureReason.NO_SAVED_CUSTOM
-            if (!failed) onApplied(tier.label)
+            val switched = outcome is TuningOutcome.Applied ||
+                (outcome is TuningOutcome.Failed && outcome.reason == FailureReason.NO_SAVED_CUSTOM)
+            if (switched) onApplied(tier.label)
         }
     }
 

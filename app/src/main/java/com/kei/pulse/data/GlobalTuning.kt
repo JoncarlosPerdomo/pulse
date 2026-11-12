@@ -46,8 +46,14 @@ sealed interface TuningOutcome {
         val governor: String? = null,
     ) : TuningOutcome
 
-    /** Saved, but not written: a bound game or AutoTDP owns the clocks. */
+    /** A side-control edit saved, but not written: AutoTDP owns the clocks. */
     data object Deferred : TuningOutcome
+
+    /**
+     * A Tier switch neither saved nor written: a bound game owns the clocks, and its exit restore would put back
+     * the pre-game Tier and caps anyway, leaving any saved side controls out of step with them.
+     */
+    data object Blocked : TuningOutcome
 
     data class Failed(val reason: FailureReason, val message: String? = null) : TuningOutcome
 }
@@ -87,10 +93,7 @@ class GlobalTuning(
         )
         val owner = ownership()
         when (owner.current()) {
-            is ClockOwner.BoundGame -> {
-                persist(next)
-                return TuningOutcome.Deferred
-            }
+            is ClockOwner.BoundGame -> return TuningOutcome.Blocked
             ClockOwner.GlobalAutoTdp -> owner.releaseGlobalAutoTdp()
             ClockOwner.Free -> Unit
         }

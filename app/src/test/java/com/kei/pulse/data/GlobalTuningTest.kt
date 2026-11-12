@@ -91,14 +91,14 @@ class GlobalTuningTest {
     }
 
     @Test
-    fun `a bound game with its own binding defers the switch`() = runTest {
+    fun `a bound game with its own binding blocks the switch without saving it`() = runTest {
         givenCustomSetup()
         ownership.owner = ClockOwner.BoundGame(autoTdp = false)
 
         val outcome = tuning.switchTo(PowerTier.MAX)
 
-        assertEquals(TuningOutcome.Deferred, outcome)
-        assertEquals(PowerTier.MAX, store.state.tier)
+        assertEquals(TuningOutcome.Blocked, outcome)
+        assertEquals(TuningState(PowerTier.CUSTOM, customSide), store.state)
         assertTrue(caps.calls.isEmpty())
         assertTrue(shell.commands.isEmpty())
         assertEquals(0, ownership.capsWrittenCount)

@@ -203,7 +203,7 @@ class PerformanceTileService : TileService() {
                        else tierCycle[(currentIndex + 1) % tierCycle.size]
         val message = when (val outcome = container.globalTuning.switchTo(nextTier)) {
             is TuningOutcome.Applied -> "Applied ${nextTier.label}"
-            TuningOutcome.Deferred -> "${nextTier.label} saved — a game owns the clocks"
+            TuningOutcome.Deferred, TuningOutcome.Blocked -> "A game owns the clocks — ${nextTier.label} not applied"
             is TuningOutcome.Failed -> when (outcome.reason) {
                 FailureReason.NO_SAVED_CUSTOM -> "Custom — adjust in app"
                 else -> outcome.message ?: "Failed to cycle tier"
