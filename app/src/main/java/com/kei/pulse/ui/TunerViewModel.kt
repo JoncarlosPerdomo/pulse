@@ -234,7 +234,6 @@ class TunerViewModel(
             if (enabled) {
                 releaseManualCapsToStock()
             } else {
-                // Enabling released the caps to stock, so disabling must re-apply the active Tier.
                 reportSwitch(tierOf(settingsStorage.settings.first()), globalTuning.reapply())
             }
             onSaved()
@@ -382,10 +381,10 @@ class TunerViewModel(
     private fun powerTargetMessage(): String? =
         settings.value.takeIf { it.powerTargetEnabled }?.let { "Power target set to ${it.powerTargetPercent}%" }
 
-    /** Surface a tuning outcome: [applied] on success (null = no message), [failed] when the reason has no text. */
     private fun report(outcome: TuningOutcome, applied: String?, failed: String) {
         when (outcome) {
             is TuningOutcome.Applied -> {
+                outcome.governor?.let { _governor.value = it }
                 val caps = outcome.caps
                 transientMessage.value = if (caps != null && !caps.verificationPassed) {
                     buildVerificationFailureMessage(state.value, caps.actualValues, caps.commandOutput)
@@ -404,7 +403,6 @@ class TunerViewModel(
     }
 
     private fun reportSwitch(tier: PowerTier, outcome: TuningOutcome) {
-        (outcome as? TuningOutcome.Applied)?.governor?.let { _governor.value = it }
         if (tier == PowerTier.CUSTOM && outcome is TuningOutcome.Failed &&
             outcome.reason == FailureReason.NO_SAVED_CUSTOM
         ) {
@@ -491,9 +489,7 @@ class TunerViewModel(
 
     fun setGovernor(option: GovernorOption) {
         viewModelScope.launch {
-            val outcome = globalTuning.edit(SideControlEdit.Governor(option))
-            (outcome as? TuningOutcome.Applied)?.governor?.let { _governor.value = it }
-            report(outcome, applied = "CPU governor: ${option.label}", failed = "Couldn't set governor")
+            report(globalTuning.edit(SideControlEdit.Governor(option)), applied = "CPU governor: ${option.label}", failed = "Couldn't set governor")
         }
     }
 

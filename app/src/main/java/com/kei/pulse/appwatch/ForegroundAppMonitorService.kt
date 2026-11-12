@@ -25,6 +25,8 @@ import com.kei.pulse.AppContainer
 import com.kei.pulse.data.SideControlEdit
 import com.kei.pulse.model.ClockOwner
 import com.kei.pulse.model.ClockOwnership
+import com.kei.pulse.model.ClockSession
+import com.kei.pulse.data.TuningOutcome
 import com.kei.pulse.MainActivity
 import com.kei.pulse.R
 import com.kei.pulse.data.AutoTuneController
@@ -240,8 +242,16 @@ class ForegroundAppMonitorService : Service() {
                 repushGlobalAutoTdp(QuickAccessScope.GlobalPerfField.PARK)
             }
             is QuickAccessAction.SetTier -> {
+                val autoTdpDefault = store.settings.first().autoTdpDefaultEnabled
                 store.persistAutoTdpDefaultEnabled(false)
-                container.globalTuning.switchTo(action.tier)
+                when (val outcome = container.globalTuning.switchTo(action.tier)) {
+                    TuningOutcome.Blocked -> {
+                        store.persistAutoTdpDefaultEnabled(autoTdpDefault)
+                        showToast("PULSE · a game owns the clocks — ${action.tier.label} not applied")
+                    }
+                    is TuningOutcome.Failed -> showToast("PULSE · ${outcome.message ?: "couldn't apply ${action.tier.label}"}")
+                    is TuningOutcome.Applied, TuningOutcome.Deferred -> Unit
+                }
             }
             else -> Unit
         }
@@ -506,27 +516,29 @@ class ForegroundAppMonitorService : Service() {
     private var autoTdpTick = 0
     private var autoTdpLogTick = 0
 
-    private val clockOwnership = object : ClockOwnership {
-        override fun current(): ClockOwner = when {
-            boundPackage != null && !QuickAccessScope.followsGlobal(boundConfig) ->
-                ClockOwner.BoundGame(autoTdp = autoTdpPackage != null)
-            autoTdpPackage != null -> ClockOwner.GlobalAutoTdp
-            else -> ClockOwner.Free
-        }
+    private val clockSession = object : ClockSession {
+        override val owner: ClockOwner
+            get() = when {
+                boundPackage != null && !QuickAccessScope.followsGlobal(boundConfig) ->
+                    ClockOwner.BoundGame(autoTdp = autoTdpPackage != null)
+                autoTdpPackage != null -> ClockOwner.GlobalAutoTdp
+                else -> ClockOwner.Free
+            }
 
         override suspend fun releaseGlobalAutoTdp() {
-            transitionMutex.withLock {
-                if (autoTdpPackage == null) return
-                stopAutoTdp()
-                clearBoundReassert()
-            }
+            if (autoTdpPackage == null) return
+            stopAutoTdp()
+            clearBoundReassert()
         }
 
         override suspend fun capsWritten() {
-            transitionMutex.withLock {
-                if (boundPackage != null) captureBoundReassertCaps()
-            }
+            if (boundPackage != null) captureBoundReassertCaps()
         }
+    }
+
+    private val clockOwnership = object : ClockOwnership {
+        override suspend fun <T> withOwnership(block: suspend ClockSession.() -> T): T =
+            transitionMutex.withLock { clockSession.block() }
     }
 
     override fun onCreate() {

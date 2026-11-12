@@ -2,6 +2,7 @@ package com.kei.pulse.data
 
 import com.kei.pulse.model.ClockOwner
 import com.kei.pulse.model.ClockOwnership
+import com.kei.pulse.model.ClockSession
 import com.kei.pulse.model.CpuPolicyInfo
 import com.kei.pulse.model.CustomTuning
 import com.kei.pulse.model.PowerTargetMath
@@ -140,6 +141,17 @@ class GlobalTuningTest {
     }
 
     @Test
+    fun `a failed Power Target re-apply fails the Custom restore`() = runTest {
+        givenCustomSetup()
+        val powerTargetCaps = PowerTargetMath.capsForPercent(policies, 69, cpuOnly = false)
+        caps.failing = { it == powerTargetCaps }
+
+        val outcome = tuning.switchTo(PowerTier.CUSTOM)
+
+        assertEquals(TuningOutcome.Failed(FailureReason.WRITE_FAILED, "write failed"), outcome)
+    }
+
+    @Test
     fun `Custom with no saved setup fails but still switches the label`() = runTest {
         store.state = TuningState(PowerTier.MAX, SideControlState.CLEARED)
 
@@ -200,6 +212,7 @@ class GlobalTuningTest {
         private val events: MutableList<String>,
     ) : CapWriter {
         val calls = mutableListOf<CapsCall>()
+        var failing: (Map<Int, Int>) -> Boolean = { false }
         override val isAvailable = true
         override fun policies() = policies
 
@@ -211,17 +224,18 @@ class GlobalTuningTest {
         ): Result<PerformanceRepository.ApplyOutcome> {
             calls += CapsCall(values, isReset, persistAsCustom)
             events += "caps"
+            if (failing(values)) return Result.failure(IllegalStateException("write failed"))
             store.last = values
             if (persistAsCustom) store.custom = values
             return Result.success(PerformanceRepository.ApplyOutcome(values, verificationPassed = true, commandOutput = null))
         }
     }
 
-    private class FakeOwnership(private val events: MutableList<String>) : ClockOwnership {
-        var owner: ClockOwner = ClockOwner.Free
+    private class FakeOwnership(private val events: MutableList<String>) : ClockOwnership, ClockSession {
+        override var owner: ClockOwner = ClockOwner.Free
         var capsWrittenCount = 0
 
-        override fun current() = owner
+        override suspend fun <T> withOwnership(block: suspend ClockSession.() -> T): T = block()
         override suspend fun releaseGlobalAutoTdp() {
             events += "release"
             owner = ClockOwner.Free

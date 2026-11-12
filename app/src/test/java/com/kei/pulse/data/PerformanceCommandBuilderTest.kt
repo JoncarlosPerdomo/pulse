@@ -88,10 +88,6 @@ class PerformanceCommandBuilderTest {
 
     @Test
     fun `prime boost-limit routing lowers and locks the prime min before its no-turbo max, perf untouched`() {
-        // Bug 2: GlobalTuning's prime-boost limit now route the no-turbo cap through
-        // applyFreqsToDevice(policies, mapOf(primeId to target)) — modelled here as the FULL policy set with
-        // only the prime (policy6) in the freq map and the prime id as the lowerMin target. The no-turbo
-        // target is the second-highest OPP (4_320_000 → 3_072_000).
         val script = builder.buildApplyScript(
             policies = policies,
             selectedValues = mapOf(6 to 3_072_000), // only the prime is written (the boost limit)
