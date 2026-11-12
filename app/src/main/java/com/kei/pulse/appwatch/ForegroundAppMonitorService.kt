@@ -101,7 +101,7 @@ class ForegroundAppMonitorService : Service() {
     private var customFanGate = CustomFanState()
     private val refreshRateController = RefreshRateController()
     private val governorController = GovernorController()
-    private val telemetryReader = TelemetryReader()
+    private val telemetryReader by lazy { TelemetryReader(container.sysfsReader) }
     private val fpsReader by lazy { FpsReader(this) }
     private val overlay by lazy { PerformanceOverlay(this) }
     private val quickAccess by lazy { QuickAccessOverlay(this) }

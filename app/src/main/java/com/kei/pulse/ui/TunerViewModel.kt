@@ -51,6 +51,7 @@ import kotlin.math.abs
 class TunerViewModel(
     private val repository: PerformanceRepository,
     private val settingsStorage: SettingsStorage,
+    private val telemetryReader: TelemetryReader,
     private val perAppConfigStorage: PerAppConfigStorage? = null,
 ) : ViewModel() {
 
@@ -152,7 +153,6 @@ class TunerViewModel(
     private val refreshRateController = RefreshRateController()
     private val gpuFloorController = GpuFloorController()
     private val cpuFloorController = CpuFloorController()
-    private val telemetryReader = TelemetryReader()
 
     private val _governor = MutableStateFlow<String?>(null)
     val governor: StateFlow<String?> = _governor
@@ -1292,12 +1292,13 @@ class TunerViewModel(
         fun factory(
             repository: PerformanceRepository,
             settingsStorage: SettingsStorage,
+            telemetryReader: TelemetryReader,
             perAppConfigStorage: PerAppConfigStorage? = null,
         ): ViewModelProvider.Factory {
             return object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                    return TunerViewModel(repository, settingsStorage, perAppConfigStorage) as T
+                    return TunerViewModel(repository, settingsStorage, telemetryReader, perAppConfigStorage) as T
                 }
             }
         }
