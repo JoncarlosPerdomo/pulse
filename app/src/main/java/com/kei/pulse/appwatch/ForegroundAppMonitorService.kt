@@ -250,7 +250,11 @@ class ForegroundAppMonitorService : Service() {
                         showToast("PULSE · a game owns the clocks — ${action.tier.label} not applied")
                     }
                     is TuningOutcome.Failed -> showToast("PULSE · ${outcome.message ?: "couldn't apply ${action.tier.label}"}")
-                    is TuningOutcome.Applied, TuningOutcome.Deferred -> Unit
+                    is TuningOutcome.Applied ->
+                        if (outcome.caps?.verificationPassed == false) {
+                            showToast("PULSE · ${action.tier.label} applied, but the clocks didn't verify")
+                        }
+                    TuningOutcome.Deferred -> Unit
                 }
             }
             else -> Unit
@@ -628,16 +632,18 @@ class ForegroundAppMonitorService : Service() {
             val cfg = foreground?.let { fg ->
                 container.perAppConfigStorage.configs.first().firstOrNull { it.packageName == fg }
             }
-            if (foreground != null && cfg != null) {
-                boundPackage = foreground
-                boundConfig = cfg
-                lastForeground = foreground
-                startOrResumeSession(foreground)
-                // Resume an AutoTDP binding without re-snapshotting (boundPackage is already set, so
-                // the pre-crash restore snapshot stands).
-                if (PerAppConfig.isAuto(cfg.profileBinding)) startAutoTdp(foreground, cfg)
-            } else {
-                transitionMutex.withLock { restoreSnapshot() }
+            transitionMutex.withLock {
+                if (foreground != null && cfg != null) {
+                    boundPackage = foreground
+                    boundConfig = cfg
+                    lastForeground = foreground
+                    startOrResumeSession(foreground)
+                    // Resume an AutoTDP binding without re-snapshotting (boundPackage is already set, so
+                    // the pre-crash restore snapshot stands).
+                    if (PerAppConfig.isAuto(cfg.profileBinding)) startAutoTdp(foreground, cfg)
+                } else {
+                    restoreSnapshot()
+                }
             }
         }
         while (serviceScope.isActive) {
@@ -714,7 +720,7 @@ class ForegroundAppMonitorService : Service() {
                 tick() // reads telemetry once (when active) and caches it for the draw-tracker + RGB below
                 trackDrawForBoundApp()
                 reassertManagedFan(settings)
-                reassertBoundCaps() // Bug 9: hold a Custom/tier binding's caps against the vendor game-boost daemon
+                transitionMutex.withLock { reassertBoundCaps() } // Bug 9: hold a Custom/tier binding's caps against the vendor game-boost daemon
                 updateRgb(settings)
             } catch (c: kotlinx.coroutines.CancellationException) {
                 throw c // never swallow cancellation — serviceScope.cancel() must still stop the loop
@@ -821,7 +827,7 @@ class ForegroundAppMonitorService : Service() {
             // Settings are fed REACTIVELY (below), not via a per-tick snapshot — the snapshot raced the optimistic
             // update and shoved a stale value back for a beat (the fan-mode "jumps back for a second" flicker).
             ensureQuickAccessSettingsFeed(quickAccessShouldShow)
-            if (autoActive) stepAutoTdp(policies, telemetry, fps)
+            if (autoActive) transitionMutex.withLock { if (autoTdpPackage != null) stepAutoTdp(policies, telemetry, fps) }
         } catch (t: Throwable) {
             android.util.Log.e("PulseOverlay", "overlay/auto tick failed", t)
         }

@@ -65,7 +65,7 @@ class AppContainer(context: Context) {
     }
 
     companion object {
-        /** Set by the foreground-app watcher while it runs; AppContainer instances are per-caller, so it lives here. */
+        /** Set by the foreground-app watcher while it runs; null when it isn't. */
         @Volatile
         var activeClockOwnership: ClockOwnership? = null
 

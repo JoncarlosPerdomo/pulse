@@ -202,7 +202,12 @@ class PerformanceTileService : TileService() {
         val nextTier = if (currentIndex == -1) tierCycle.first()
                        else tierCycle[(currentIndex + 1) % tierCycle.size]
         val message = when (val outcome = container.globalTuning.switchTo(nextTier)) {
-            is TuningOutcome.Applied -> "Applied ${nextTier.label}"
+            is TuningOutcome.Applied ->
+                if (outcome.caps?.verificationPassed == false) {
+                    "${nextTier.label} applied, but the clocks didn't verify"
+                } else {
+                    "Applied ${nextTier.label}"
+                }
             TuningOutcome.Deferred, TuningOutcome.Blocked -> "A game owns the clocks — ${nextTier.label} not applied"
             is TuningOutcome.Failed -> when (outcome.reason) {
                 FailureReason.NO_SAVED_CUSTOM -> "Custom — adjust in app"
