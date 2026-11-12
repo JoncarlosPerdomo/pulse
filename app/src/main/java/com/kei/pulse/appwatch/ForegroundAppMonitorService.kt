@@ -2026,7 +2026,7 @@ class ForegroundAppMonitorService : Service() {
 
         fun hasUsageAccess(context: Context): Boolean {
             val appOps = context.getSystemService<AppOpsManager>() ?: return false
-            val mode = appOps.unsafeCheckOpNoThrow(
+            val mode = appOps.checkOpNoThrow(
                 AppOpsManager.OPSTR_GET_USAGE_STATS,
                 Process.myUid(),
                 context.packageName,
