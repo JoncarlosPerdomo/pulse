@@ -40,6 +40,7 @@ class TileControlActivity : ComponentActivity() {
             repository = container.repository,
             settingsStorage = container.settingsStorage,
             telemetryReader = TelemetryReader(container.sysfsReader),
+            globalTuning = container.globalTuning,
         )
     }
 

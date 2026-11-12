@@ -12,6 +12,8 @@ import android.widget.Toast
 import com.kei.pulse.AppContainer
 import com.kei.pulse.R
 import com.kei.pulse.TileControlActivity
+import com.kei.pulse.data.FailureReason
+import com.kei.pulse.data.TuningOutcome
 import com.kei.pulse.model.AppSettings
 import com.kei.pulse.model.PowerTier
 import com.kei.pulse.model.ProfileStateResolver
@@ -199,24 +201,16 @@ class PerformanceTileService : TileService() {
         val currentIndex = tierCycle.indexOfFirst { it.label == currentLabel }
         val nextTier = if (currentIndex == -1) tierCycle.first()
                        else tierCycle[(currentIndex + 1) % tierCycle.size]
-        if (nextTier == PowerTier.CUSTOM) {
-            // Restore the user's saved Custom setup if they have one; otherwise
-            // just switch the label into Custom (manual) mode.
-            container.settingsStorage.persistActiveTierLabel(PowerTier.CUSTOM.label)
-            val restored = container.repository.restoreCustomValues()
-            updateTileToActive(container)
-            showToast(if (restored.isSuccess) "Applied Custom" else "Custom — adjust in app")
-        } else {
-            container.repository.applyTier(nextTier)
-                .onSuccess {
-                    container.settingsStorage.persistActiveTierLabel(nextTier.label)
-                    updateTileToActive(container)
-                    showToast("Applied ${nextTier.label}")
-                }
-                .onFailure { throwable ->
-                    showToast(throwable.message ?: "Failed to cycle tier")
-                }
+        val message = when (val outcome = container.globalTuning.switchTo(nextTier)) {
+            is TuningOutcome.Applied -> "Applied ${nextTier.label}"
+            TuningOutcome.Deferred -> "${nextTier.label} saved — a game owns the clocks"
+            is TuningOutcome.Failed -> when (outcome.reason) {
+                FailureReason.NO_SAVED_CUSTOM -> "Custom — adjust in app"
+                else -> outcome.message ?: "Failed to cycle tier"
+            }
         }
+        updateTileToActive(container)
+        showToast(message)
     }
 
     private suspend fun updateTileToActive(container: AppContainer) {

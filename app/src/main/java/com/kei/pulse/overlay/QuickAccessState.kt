@@ -67,8 +67,6 @@ object QuickAccess {
             settings // per-app: applied to the foreground game's PerAppConfig via QuickAccessPerApp
         // (global-scope SetStockMode reduces via QuickAccessScope.globalReduce)
         is QuickAccessAction.SetPowerTarget -> {
-            // Wired (2026-07-03): the service's applyQaPowerTarget computes the caps via the shared
-            // PowerTargetMath and applies them with persistAsCustom — same path as the in-app slider.
             val pct = action.percent.coerceIn(POWER_TARGET_MIN, POWER_TARGET_MAX)
             settings.copy(powerTargetPercent = pct, powerTargetEnabled = pct < POWER_TARGET_MAX)
         }
