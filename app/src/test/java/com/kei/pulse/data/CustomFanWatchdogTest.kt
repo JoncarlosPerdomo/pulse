@@ -1,8 +1,9 @@
 package com.kei.pulse.data
 
 import com.kei.pulse.data.CustomFanWatchdog.Action
-import com.kei.pulse.data.CustomFanWatchdog.Arming
+import com.kei.pulse.data.CustomFanWatchdog.LaunchOutcome
 import com.kei.pulse.data.CustomFanWatchdog.State
+import com.kei.pulse.data.CustomFanWatchdog.Status
 import com.kei.pulse.root.RootSupport
 import com.kei.pulse.root.SysfsBatch
 import java.io.File
@@ -37,13 +38,12 @@ class CustomFanWatchdogTest {
     }
 
     @Test
-    fun nextArmsOnSuccessAndBacksOffOnFailure() {
-        assertEquals(State.Armed(7), CustomFanWatchdog.next(State.Idle, 7, Arming.Succeeded))
+    fun nextArmsOnSuccessAndBacksOffForTheStaleWindowOnFailure() {
+        assertEquals(State.Armed(7), CustomFanWatchdog.next(State.Idle, 7, LaunchOutcome.Succeeded))
         assertEquals(
-            State.BackingOff(7 + CustomFanWatchdog.BACKOFF_MS),
-            CustomFanWatchdog.next(State.Armed(0), 7, Arming.Failed),
+            State.BackingOff(7 + CustomFanWatchdog.STALE_AFTER_MS),
+            CustomFanWatchdog.next(State.Armed(0), 7, LaunchOutcome.Failed),
         )
-        assertEquals(State.BackingOff(10), CustomFanWatchdog.next(State.BackingOff(10), 7, null))
     }
 
     @Test
@@ -52,9 +52,9 @@ class CustomFanWatchdogTest {
         var time = 1L
         var launches = 0
         val watchdog = CustomFanWatchdog(heartbeat, { time }) { launches++; CustomFanWatchdog.STARTED }
-        assertTrue(watchdog.startOrBeatBeforeDriving())
+        assertEquals(Status.Armed, watchdog.startOrBeatBeforeDriving())
         time++
-        assertTrue(watchdog.startOrBeatBeforeDriving())
+        assertEquals(Status.Armed, watchdog.startOrBeatBeforeDriving())
         assertEquals(1, launches)
         assertEquals("2", heartbeat.readText())
     }
@@ -65,7 +65,7 @@ class CustomFanWatchdogTest {
         var launches = 0
         val watchdog = CustomFanWatchdog(folder.newFile(), { time }) { launches++; CustomFanWatchdog.STARTED }
         repeat(10) {
-            assertTrue(watchdog.startOrBeatBeforeDriving())
+            assertEquals(Status.Armed, watchdog.startOrBeatBeforeDriving())
             time += SLOW_TICK_GAP_MS
         }
         assertEquals(1, launches)
@@ -76,11 +76,11 @@ class CustomFanWatchdogTest {
         val heartbeat = folder.newFile()
         var launches = 0
         val watchdog = CustomFanWatchdog(heartbeat, { 1L }) { launches++; CustomFanWatchdog.STARTED }
-        assertTrue(watchdog.startOrBeatBeforeDriving())
+        assertEquals(Status.Armed, watchdog.startOrBeatBeforeDriving())
         watchdog.stop()
         watchdog.stop()
         assertEquals("1", heartbeat.readText())
-        assertTrue(watchdog.startOrBeatBeforeDriving())
+        assertEquals(Status.Armed, watchdog.startOrBeatBeforeDriving())
         assertEquals(2, launches)
     }
 
@@ -89,50 +89,72 @@ class CustomFanWatchdogTest {
         var time = 0L
         var launches = 0
         val watchdog = CustomFanWatchdog(folder.newFile(), { time }) { launches++; CustomFanWatchdog.STARTED }
-        assertTrue(watchdog.startOrBeatBeforeDriving())
+        assertEquals(Status.Armed, watchdog.startOrBeatBeforeDriving())
         time = CustomFanWatchdog.STALE_AFTER_MS
-        assertTrue(watchdog.startOrBeatBeforeDriving())
+        assertEquals(Status.Armed, watchdog.startOrBeatBeforeDriving())
         assertEquals(2, launches)
     }
 
     @Test
-    fun failedLaunchBacksOffEvenAfterStop() {
+    fun stallBetweenSamplingAndWritingNearTheBoundaryRelaunches() {
+        val times = ArrayDeque(
+            listOf(0L, 0L, CustomFanWatchdog.STALE_AFTER_MS - 100, CustomFanWatchdog.STALE_AFTER_MS + 100),
+        )
+        var launches = 0
+        val watchdog = CustomFanWatchdog(folder.newFile(), { times.removeFirst() }) {
+            launches++
+            CustomFanWatchdog.STARTED
+        }
+        assertEquals(Status.Armed, watchdog.startOrBeatBeforeDriving())
+        assertEquals(Status.Armed, watchdog.startOrBeatBeforeDriving())
+        assertEquals(2, launches)
+    }
+
+    @Test
+    fun failedLaunchBacksOffOnceEvenAfterStop() {
         var time = 0L
         var launches = 0
         val watchdog = CustomFanWatchdog(folder.newFile(), { time }) {
             if (++launches == 1) null else CustomFanWatchdog.STARTED
         }
-        assertFalse(watchdog.startOrBeatBeforeDriving())
+        assertEquals(Status.BackoffStarted, watchdog.startOrBeatBeforeDriving())
         watchdog.stop()
-        time = CustomFanWatchdog.BACKOFF_MS - 1
-        assertFalse(watchdog.startOrBeatBeforeDriving())
+        time = CustomFanWatchdog.STALE_AFTER_MS - 1
+        assertEquals(Status.BackingOff, watchdog.startOrBeatBeforeDriving())
         assertEquals(1, launches)
-        time = CustomFanWatchdog.BACKOFF_MS
-        assertTrue(watchdog.startOrBeatBeforeDriving())
+        time = CustomFanWatchdog.STALE_AFTER_MS
+        assertEquals(Status.Armed, watchdog.startOrBeatBeforeDriving())
         assertEquals(2, launches)
     }
 
     @Test
-    fun unwritableHeartbeatDisallowsDrivingWithoutLaunching() {
-        val watchdog = CustomFanWatchdog(File(folder.root, "missing/beat")) {
+    fun unwritableHeartbeatBacksOffWithoutLaunching() {
+        val watchdog = CustomFanWatchdog(File(folder.root, "missing/beat"), { 0L }) {
             error("Must not launch without a heartbeat")
         }
-        assertFalse(watchdog.startOrBeatBeforeDriving())
+        assertEquals(Status.BackoffStarted, watchdog.startOrBeatBeforeDriving())
     }
 
     @Test
-    fun unreplaceableHeartbeatDisallowsDriving() {
-        val watchdog = CustomFanWatchdog(folder.newFolder().apply { File(this, "x").createNewFile() }) {
+    fun unreplaceableHeartbeatBacksOff() {
+        val heartbeat = folder.newFolder().apply { File(this, "x").createNewFile() }
+        val watchdog = CustomFanWatchdog(heartbeat, { 0L }) {
             error("Must not launch without a heartbeat")
         }
-        assertFalse(watchdog.startOrBeatBeforeDriving())
+        assertEquals(Status.BackoffStarted, watchdog.startOrBeatBeforeDriving())
     }
 
     @Test
-    fun launcherPrintsStartedForTheWatchdogToRecognize() {
+    fun launcherPrintsStartedOnceTheWatcherIsUp() {
         val sandbox = ScriptSandbox()
         assertEquals(CustomFanWatchdog.STARTED, sandbox.launch().trim())
         sandbox.waitForRestore()
+    }
+
+    @Test
+    fun launcherDoesNotPrintStartedWhenTheWatcherCannotStart() {
+        val sandbox = ScriptSandbox(lockName = "missing/lock")
+        assertFalse(sandbox.launch().contains(CustomFanWatchdog.STARTED))
     }
 
     @Test
@@ -202,23 +224,51 @@ class CustomFanWatchdogTest {
     }
 
     @Test
+    fun freshBeatAtTheStaleBoundaryCancelsTheRestore() {
+        val sandbox = ScriptSandbox()
+        sandbox.beatOnModeRead = true
+        val watcher = sandbox.watch()
+        Thread.sleep(FRESH_BEAT_OBSERVATION_MS)
+        assertEquals(0, sandbox.restores())
+        assertEquals(FanController.CUSTOM, sandbox.mode())
+        watcher.destroyForcibly()
+    }
+
+    @Test
     fun watcherFinishesARestoreItsPredecessorLeftMidBounce() {
-        val sandbox = ScriptSandbox(fanMode = FanController.bounceModeFor(FanController.SMART))
-        sandbox.restoringMarker.createNewFile()
-        sandbox.watchUntilExit()
+        val sandbox = ScriptSandbox(fanMode = FanController.bounceModeFor(FanController.SMART), staleAfterMs = MARKER_STALE_AFTER_MS)
+        sandbox.leaveRestoreMarker(ageMs = 0)
+        val watcher = sandbox.watch()
+        sandbox.waitForAck()
         assertEquals(FanController.SMART, sandbox.mode())
         assertFalse(sandbox.restoringMarker.exists())
-        sandbox.assertRestoredOnceAndUnlocked()
+        assertEquals(1, sandbox.restores())
+        watcher.destroyForcibly()
+    }
+
+    @Test
+    fun oldRestoreMarkerDoesNotOverrideASilentModeTheUserChose() {
+        val silent = FanController.bounceModeFor(FanController.SMART)
+        val sandbox = ScriptSandbox(fanMode = silent, staleAfterMs = MARKER_STALE_AFTER_MS)
+        sandbox.leaveRestoreMarker(ageMs = 2 * MARKER_STALE_AFTER_MS)
+        val watcher = sandbox.watch()
+        sandbox.waitForAck()
+        assertEquals(silent, sandbox.mode())
+        assertFalse(sandbox.restoringMarker.exists())
+        assertEquals(0, sandbox.restores())
+        watcher.destroyForcibly()
     }
 
     @Test
     fun restoreMarkerWithoutAMidBounceModeIsIgnored() {
-        val sandbox = ScriptSandbox(fanMode = FanController.SPORT)
-        sandbox.restoringMarker.createNewFile()
-        sandbox.watchUntilExit()
+        val sandbox = ScriptSandbox(fanMode = FanController.SPORT, staleAfterMs = MARKER_STALE_AFTER_MS)
+        sandbox.leaveRestoreMarker(ageMs = 0)
+        val watcher = sandbox.watch()
+        sandbox.waitForAck()
         assertEquals(FanController.SPORT, sandbox.mode())
         assertFalse(sandbox.restoringMarker.exists())
         assertEquals(0, sandbox.restores())
+        watcher.destroyForcibly()
     }
 
     @Test
@@ -238,24 +288,36 @@ class CustomFanWatchdogTest {
     private fun deadPid(): Long =
         ProcessBuilder("sh", "-c", "echo $$").start().run { inputStream.bufferedReader().readText().trim().toLong() }
 
-    private inner class ScriptSandbox(fanMode: Int = FanController.CUSTOM) {
+    private fun uptimeMs(): Long = (File("/proc/uptime").readText().substringBefore(' ').toDouble() * 1000).toLong()
+
+    private inner class ScriptSandbox(
+        fanMode: Int = FanController.CUSTOM,
+        staleAfterMs: Long = TEST_STALE_AFTER_MS,
+        lockName: String = "lock",
+    ) {
         val dir: File = folder.newFolder()
         private val log = File(dir, "restored")
         private val modeFile = File(dir, "fan_mode").apply { writeText("$fanMode") }
         private val heartbeat = File(dir, "it's beat")
         private val beatingFlag = File(dir, "beating")
+        private val beatOnModeReadFlag = File(dir, "beat-on-mode-read")
         private val slowRestoreFlag = File(dir, "slow-restore")
         private val bounced = File(dir, "bounced")
         private val bin = File(dir, "bin").apply { mkdir() }
-        val lock = File(dir, "lock")
-        val restoringMarker = File(dir, "lock.restoring")
+        val lock = File(dir, lockName)
+        val restoringMarker = File(dir, "$lockName.restoring")
+        private val ack = File(dir, "$lockName.ack")
         private val script = File(dir, "watchdog.sh").apply {
-            writeText(CustomFanWatchdog.script(heartbeat.absolutePath, lock.absolutePath, TEST_STALE_AFTER_MS))
+            writeText(CustomFanWatchdog.script(heartbeat.absolutePath, lock.absolutePath, staleAfterMs))
         }
 
         var beating: Boolean
             get() = beatingFlag.exists()
             set(value) { if (value) beatingFlag.createNewFile() else beatingFlag.delete() }
+
+        var beatOnModeRead: Boolean
+            get() = beatOnModeReadFlag.exists()
+            set(value) { if (value) beatOnModeReadFlag.createNewFile() else beatOnModeReadFlag.delete() }
 
         var slowRestore: Boolean
             get() = slowRestoreFlag.exists()
@@ -268,7 +330,9 @@ class CustomFanWatchdogTest {
                 "settings",
                 """
                 case "${'$'}1" in
-                get) cat ${quoted(modeFile)};;
+                get)
+                    [ -e ${quoted(beatOnModeReadFlag)} ] && echo "${'$'}${'$'}-${'$'}(date +%s%N)" > ${quoted(heartbeat)}
+                    cat ${quoted(modeFile)};;
                 put) if [ "${'$'}3" = fan_mode ]; then
                     echo "${'$'}4" > ${quoted(modeFile)}
                     [ "${'$'}4" = ${FanController.SMART} ] && echo restored >> ${quoted(log)}
@@ -289,6 +353,8 @@ class CustomFanWatchdogTest {
             }
         }
 
+        fun leaveRestoreMarker(ageMs: Long) = restoringMarker.writeText("${uptimeMs() - ageMs}")
+
         fun mode(): Int = modeFile.readText().trim().toInt()
 
         fun watch(): Process = start("watch")
@@ -306,6 +372,8 @@ class CustomFanWatchdogTest {
         fun waitForLock() = waitUntil { File(lock, "pid").exists() }
 
         fun waitForBounce() = waitUntil { bounced.exists() }
+
+        fun waitForAck() = waitUntil { ack.exists() }
 
         fun restores(): Int = if (log.exists()) log.readLines().size else 0
 
@@ -333,9 +401,11 @@ class CustomFanWatchdogTest {
     private companion object {
         const val SCRIPT_TIMEOUT_SECONDS = 15L
         const val TEST_STALE_AFTER_MS = 300L
-        const val SLOW_RESTORE_SECONDS = 1
+        const val MARKER_STALE_AFTER_MS = 10_000L
+        const val SLOW_RESTORE_SECONDS = "0.5"
         const val SLOW_TICK_GAP_MS = 4_000L
         const val FRESH_LOCK_OBSERVATION_MS = 600L
+        const val FRESH_BEAT_OBSERVATION_MS = 1_000L
         const val POLL_ATTEMPTS = 200
         const val POLL_PAUSE_MS = 25L
     }

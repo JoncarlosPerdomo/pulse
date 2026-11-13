@@ -15,6 +15,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.Process
+import android.os.SystemClock
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -96,7 +97,7 @@ class ForegroundAppMonitorService : Service() {
     private val container by lazy { AppContainer(this) }
     private val fanController = FanController()
     private val fanWatchdog by lazy {
-        CustomFanWatchdog(File(filesDir, "fan-heartbeat")) { script ->
+        CustomFanWatchdog(File(filesDir, "fan-heartbeat"), SystemClock::elapsedRealtime) { script ->
             RootSupport.runGeneratedScript(this, "fan-watchdog.sh", script)
         }
     }
@@ -436,7 +437,7 @@ class ForegroundAppMonitorService : Service() {
             // truncation). The action gate keeps the combo in-game-only even though detection stays armed.
             com.kei.pulse.data.InputComboWatcher(
                 runScript = { contents ->
-                    RootSupport.runGeneratedScript(this@ForegroundAppMonitorService, "qa_combo_producer.sh", contents)
+                    com.kei.pulse.root.RootSupport.runGeneratedScript(this@ForegroundAppMonitorService, "qa_combo_producer.sh", contents)
                 },
                 fastPoll = { qaComboActionAllowed },
             ).detect(keys) { if (qaComboActionAllowed) quickAccess.toggle() }
@@ -592,7 +593,7 @@ class ForegroundAppMonitorService : Service() {
         }
         // Safety net: if Custom was driving (vendor left in manual passthrough), hand the fan back to the Smart
         // auto-curve off-main so a teardown can't strand it in manual mode with no vendor thermal regulation.
-        if (customFanRunning) stopCustomFan(restoreVendor = true, outlivesScope = true)
+        if (customFanRunning) stopCustomFan(Restore.Detached)
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -858,7 +859,7 @@ class ForegroundAppMonitorService : Service() {
             customFanGate = CustomFanGate.next(customFanGate, sm.roundToInt(), targetPercent, FanCurve.MIN_PERCENT)
             if (!customFanGate.active) {
                 if (customFanRunning) {
-                    stopCustomFan(restoreVendor = true) // stop driving + hand the fan back to vendor Smart
+                    stopCustomFan(Restore.InScope) // stop driving + hand the fan back to vendor Smart
                 } else if (fanController.readMode() != FanController.SMART) {
                     // Fresh/idle and the fan is NOT on Smart (e.g. a stranded fan_mode=6 from a prior kill) —
                     // restore Smart so the fan is quiet and vendor-regulated.
@@ -892,7 +893,7 @@ class ForegroundAppMonitorService : Service() {
     private suspend fun reassertManagedFan(settings: AppSettings) {
         // Autocalibrate is sweeping the duty node directly — stand down so we don't fight its writes.
         if (FanCurveController.externalControlActive) {
-            if (customFanRunning && !armFanWatchdog()) stopCustomFan(restoreVendor = true)
+            if (customFanRunning) armFanWatchdog()
             return
         }
         val autoActive = autoTdpPackage != null
@@ -920,7 +921,7 @@ class ForegroundAppMonitorService : Service() {
             is FanAction.RunCustomLoop -> {
                 // Custom fan (all 3 devices expose gpio5_pwm2): manual passthrough + PULSE drives the duty.
                 // If the node vanished or the watchdog can't arm, never sit on a phantom Custom mode — fall back to Smart.
-                if (!runCustomFan(settings)) stopCustomFan(restoreVendor = true)
+                if (!runCustomFan(settings)) stopCustomFan(Restore.InScope)
             }
             is FanAction.SetVendorMode -> {
                 stopCustomFan()
@@ -943,11 +944,11 @@ class ForegroundAppMonitorService : Service() {
             }
             FanAction.None -> {
                 // Held / AutoTDP-owns / latched / unreadable: make sure no stale Custom loop keeps driving the
-                // duty, and latch a completed release. On the unmanaged path, restoreVendor keeps the old safety
+                // duty, and latch a completed release. On the unmanaged path, Restore.InScope keeps the old safety
                 // net: even if the mode read failed, a running Custom loop still hands the fan back to Smart
                 // (never stranded in manual passthrough with no vendor thermal regulation).
                 if (!autoActive && boundFan == null && settings.managedFanMode == null) {
-                    stopCustomFan(restoreVendor = true)
+                    stopCustomFan(Restore.InScope)
                     lastManagedFan = null
                     fanReleasedToVendor = true
                 } else {
@@ -958,7 +959,7 @@ class ForegroundAppMonitorService : Service() {
     }
 
     /**
-     * Stop driving the custom fan curve (if running). Pass [restoreVendor] = true when NO other fan mode is
+     * Stop driving the custom fan curve (if running). Pass a [Restore] other than None when NO other fan mode is
      * about to take over (PULSE going idle / shutting down) so we hand the fan back to the vendor's Smart auto
      * curve — otherwise it'd be stranded in manual passthrough with no thermal regulation. When switching to
      * another vendor mode the caller sets that mode itself, so the restore is skipped.
@@ -986,7 +987,7 @@ class ForegroundAppMonitorService : Service() {
         // this is belt-and-suspenders; CancellationException still propagates so serviceScope.cancel() stops
         // the loop. Fan is first (a stranded fan_mode=6 is the only dangerous strand), combo disarm last.
         val fanReleased = customFanRunning
-        guardedOneShot("fan release") { if (customFanRunning) stopCustomFan(restoreVendor = true) }
+        guardedOneShot("fan release") { if (customFanRunning) stopCustomFan(Restore.InScope) }
         guardedOneShot("rgb dark") { if (settings.rgbMode != RgbMode.OFF) rgbController.setColor(0, 0, 0) } // self-gated
         val autoPaused = autoTdpPackage != null
         guardedOneShot("autotdp pause") { if (autoPaused) autoTune.pauseForScreenOff(ensurePolicies()) }
@@ -1008,7 +1009,9 @@ class ForegroundAppMonitorService : Service() {
         }
     }
 
-    private fun stopCustomFan(restoreVendor: Boolean = false, outlivesScope: Boolean = false) {
+    private enum class Restore { None, InScope, Detached }
+
+    private fun stopCustomFan(restore: Restore = Restore.None) {
         fanWatchdog.stop()
         customFanGate = CustomFanState() // re-arm the idle-on-Smart gate for the next Custom session
         if (customFanRunning) {
@@ -1018,18 +1021,31 @@ class ForegroundAppMonitorService : Service() {
             fanCurveController.reset()
             fanTempController.reset() // clear the PI integral so a new session starts clean
             smoothedFanTempC = null // re-seed the temp EMA on the next Custom session
-            if (restoreVendor && outlivesScope) {
-                Thread { runCatching { fanController.setMode(FanController.SMART) } }.start()
-            } else if (restoreVendor) {
-                serviceScope.launch(Dispatchers.IO) { fanController.setMode(FanController.SMART) }
+            handBackToSmart(restore)
+        }
+    }
+
+    private fun handBackToSmart(restore: Restore) {
+        val handBack = { if (fanController.readMode() != FanController.SMART) fanController.setMode(FanController.SMART) }
+        when (restore) {
+            Restore.None -> Unit
+            Restore.InScope -> serviceScope.launch(Dispatchers.IO) { handBack() }
+            Restore.Detached -> Thread { runCatching { handBack() } }.apply {
+                start()
+                join(DESTROY_HAND_BACK_TIMEOUT_MS)
             }
         }
     }
 
     private fun armFanWatchdog(): Boolean {
-        val armed = fanWatchdog.startOrBeatBeforeDriving()
-        if (!armed) fanLog("CUSTOM watchdog unavailable; fan driving paused with retry backoff")
-        return armed
+        val status = fanWatchdog.startOrBeatBeforeDriving()
+        if (status == CustomFanWatchdog.Status.Armed) return true
+        if (status == CustomFanWatchdog.Status.BackoffStarted) {
+            fanLog("CUSTOM watchdog unavailable; fan driving paused with retry backoff")
+            stopCustomFan()
+            handBackToSmart(Restore.InScope)
+        }
+        return false
     }
 
     /**
@@ -1931,6 +1947,7 @@ class ForegroundAppMonitorService : Service() {
         // Diagnostic AutoTDP logging (adb logcat -s PulseAutoTdp) — on while verifying on-device.
         private const val AUTO_DEBUG = true
         private const val POLL_INTERVAL_MS = 1_000L
+        private const val DESTROY_HAND_BACK_TIMEOUT_MS = 2_000L
         private const val FAN_SLEW_MS = 300L // smooth-ramp cadence: small steps → smooth & quiet
         private const val FAN_RECHECK_MS = 120L // duty re-check cadence: catch the vendor's game-transition
         // 50% reset fast enough that the re-pin is inaudible (decoupled from the slower ramp above)

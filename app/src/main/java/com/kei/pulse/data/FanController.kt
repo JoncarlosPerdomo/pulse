@@ -79,7 +79,7 @@ class FanController {
          */
         fun bounceModeFor(target: Int): Int = if (target == SMART) SILENT else SMART
 
-        fun vendorModeCommand(mode: Int): String =
+        internal fun vendorModeCommand(mode: Int): String =
             "settings put system fan_mode ${bounceModeFor(mode)}; " +
                 "settings put system fan_mode $mode; " +
                 "settings put system is_quick_set_performance_and_fan_enable 1; " +

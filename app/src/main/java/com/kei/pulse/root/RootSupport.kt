@@ -9,7 +9,7 @@ import kotlin.concurrent.withLock
 
 object RootSupport {
 
-    const val PSERVER_COMMAND_LIMIT = 255
+    internal const val PSERVER_COMMAND_LIMIT = 255
 
     // Process-wide serialization of PServer access. The binder cannot service overlapping
     // transacts reliably, and several callers (per-app watcher apply, telemetry poll, tile,
