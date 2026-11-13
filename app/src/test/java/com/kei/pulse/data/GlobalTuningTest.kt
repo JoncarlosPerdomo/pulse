@@ -248,12 +248,12 @@ class GlobalTuningTest {
         checkedTuning.edit(SideControlEdit.Governor(GovernorController.OPTIONS.first()))
         assertTrue(shell.commands.isNotEmpty())
     }
+
     @Test
-    fun `Power Target slider and switch reassert the global GPU floor after caps`() = runTest {
+    fun `Power Target edits reassert the global GPU floor after caps`() = runTest {
         store.state = TuningState(PowerTier.CUSTOM, SideControlState.CLEARED.copy(gpuFloorPercent = 75))
 
         for (edit in listOf(
-            SideControlEdit.PowerTarget(true, 65),
             SideControlEdit.PowerTarget(true, 65),
             SideControlEdit.PowerTargetCpuOnly(true),
         )) {
@@ -267,13 +267,13 @@ class GlobalTuningTest {
     }
 
     @Test
-    fun `binding apply and periodic reapply inherit the global GPU floor`() = runTest {
+    fun `repeated cap writes without a binding floor each reassert the global GPU floor`() = runTest {
         store.state = TuningState(PowerTier.CUSTOM, SideControlState.CLEARED.copy(gpuFloorPercent = 75))
 
         repeat(2) {
             shell.commands.clear()
             events.clear()
-            tuning.applyBindingCaps(policies) {
+            tuning.writeCapsReassertingGpu(policies) {
                 caps.applyCaps(policies, mapOf(gpu.id to 500_000), false, false)
             }
             assertTrue(shell.wrote("min_pwrlevel", "echo 1"))
@@ -285,14 +285,14 @@ class GlobalTuningTest {
     @Test
     fun `leaving a bound app restores the global floor after restoring caps`() = runTest {
         store.state = TuningState(PowerTier.CUSTOM, SideControlState.CLEARED.copy(gpuFloorPercent = 75))
-        tuning.applyBindingCaps(policies, gpuFloorPercent = 0) {
+        tuning.writeCapsReassertingGpu(policies, gpuFloorPercent = 0) {
             caps.applyCaps(policies, mapOf(gpu.id to 500_000), false, false)
         }
         assertTrue(shell.wrote("min_pwrlevel", "echo 2"))
         shell.commands.clear()
         events.clear()
 
-        tuning.applyBindingCaps(policies) {
+        tuning.writeCapsReassertingGpu(policies) {
             caps.applyCaps(policies, mapOf(gpu.id to 800_000), false, false)
         }
 
@@ -307,7 +307,7 @@ class GlobalTuningTest {
         val global = SideControlState.CLEARED.copy(gpuLocked = true)
         store.state = TuningState(PowerTier.CUSTOM, global)
 
-        tuning.applyBindingCaps(policies, gpuFloorPercent = 75) {
+        tuning.writeCapsReassertingGpu(policies, gpuFloorPercent = 75) {
             caps.applyCaps(policies, mapOf(gpu.id to 500_000), false, false)
         }
 
@@ -317,10 +317,32 @@ class GlobalTuningTest {
     }
 
     @Test
+    fun `a GPU floor edit cannot exceed the cap`() = runTest {
+        shell.gpuCapLevel = 2
+
+        tuning.edit(SideControlEdit.GpuFloor(75))
+
+        assertTrue(shell.wrote("min_pwrlevel", "echo 2"))
+        assertFalse(shell.wrote("min_pwrlevel", "echo 1"))
+    }
+
+    @Test
+    fun `cap writes from outside the locks enter clock ownership but holders of it do not re-enter`() = runTest {
+        store.state = TuningState(PowerTier.CUSTOM, SideControlState.CLEARED.copy(gpuFloorPercent = 75))
+
+        tuning.writeCapsReassertingGpu(policies) {}
+        assertEquals(1, ownership.entries)
+        assertTrue(shell.wrote("min_pwrlevel", "echo 1"))
+
+        tuning.writeCapsReassertingGpuUnderOwnership(policies) {}
+        assertEquals(1, ownership.entries)
+    }
+
+    @Test
     fun `a binding GPU floor cannot exceed its cap`() = runTest {
         shell.gpuCapLevel = 2
 
-        tuning.applyBindingCaps(policies, gpuFloorPercent = 75) {
+        tuning.writeCapsReassertingGpu(policies, gpuFloorPercent = 75) {
             caps.applyCaps(policies, mapOf(gpu.id to 200_000), false, false)
         }
 
@@ -412,7 +434,12 @@ class GlobalTuningTest {
         override var owner: ClockOwner = ClockOwner.Free
         var capsWrittenCount = 0
 
-        override suspend fun <T> withOwnership(block: suspend ClockSession.() -> T): T = block()
+        var entries = 0
+
+        override suspend fun <T> withOwnership(block: suspend ClockSession.() -> T): T {
+            entries++
+            return block()
+        }
         override suspend fun releaseGlobalAutoTdp() {
             events += "release"
             owner = ClockOwner.Free

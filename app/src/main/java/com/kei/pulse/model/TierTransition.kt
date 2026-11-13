@@ -17,6 +17,9 @@ data class SideControlState(
     val primeCoreBoostLimited: Boolean,
 ) {
     companion object {
+        /** The percent chips offered for the GPU and CPU floors; 0 clears the floor. */
+        val FLOOR_PERCENT_OPTIONS = listOf(0, 25, 50, 75)
+
         /** All side-controls at their neutral defaults (nothing governing). */
         val CLEARED = SideControlState(
             powerTargetEnabled = false,

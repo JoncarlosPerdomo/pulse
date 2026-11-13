@@ -174,7 +174,9 @@ class GlobalTuning(
                     }
                     is SideControlEdit.GpuFloor -> {
                         if (gpu == null) return@withOwnership TuningOutcome.Failed(FailureReason.NO_GPU)
-                        gpuFloor.setFloorLevel(gpu.policyPath, gpuFloorLevelFor(gpu, edit.percent))
+                        val level = gpuFloorLevel(gpu, edit.percent)
+                            ?: return@withOwnership TuningOutcome.Failed(FailureReason.WRITE_FAILED)
+                        gpuFloor.setFloorLevel(gpu.policyPath, level)
                         TuningOutcome.Applied()
                     }
                     is SideControlEdit.CpuFloor ->
@@ -211,14 +213,30 @@ class GlobalTuning(
                     ClockOwner.GlobalAutoTdp -> releaseGlobalAutoTdp()
                     ClockOwner.Free -> Unit
                 }
-                val outcome = applyBindingCaps(policies) { caps.applyDisplayProfileById(profileId) }.toOutcome()
+                val outcome = writeCapsReassertingGpuUnderOwnership(policies) { caps.applyDisplayProfileById(profileId) }.toOutcome()
                 capsWritten()
                 outcome
             }
         }
     }
 
-    suspend fun <T> applyBindingCaps(
+    /**
+     * Runs [writeCaps], then re-pins the GPU lock or floor that the cap write released. A non-null [gpuFloorPercent]
+     * is a per-app binding's floor and replaces the global lock and floor for this write. For callers that hold
+     * neither this module's lock nor clock ownership; the global tuning it reads can't change mid-write.
+     */
+    suspend fun <T> writeCapsReassertingGpu(
+        policies: List<CpuPolicyInfo>,
+        gpuFloorPercent: Int? = null,
+        writeCaps: suspend () -> T,
+    ): T = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            ownership().withOwnership { writeCapsReassertingGpuUnderOwnership(policies, gpuFloorPercent, writeCaps) }
+        }
+    }
+
+    /** [writeCapsReassertingGpu] for a caller already inside [ClockOwnership.withOwnership], which must not re-enter it. */
+    suspend fun <T> writeCapsReassertingGpuUnderOwnership(
         policies: List<CpuPolicyInfo>,
         gpuFloorPercent: Int? = null,
         writeCaps: suspend () -> T,
@@ -295,11 +313,12 @@ class GlobalTuning(
         if (side.gpuLocked) {
             gpuFloor.lockToCurrentCap(gpu.policyPath)
         } else {
-            val ceiling = shell.run("cat ${gpu.policyPath}/max_pwrlevel")?.trim()?.toIntOrNull() ?: return
-            val floor = gpuFloorLevelFor(gpu, side.gpuFloorPercent, ceiling)
-            gpuFloor.setFloorLevel(gpu.policyPath, floor)
+            gpuFloorLevel(gpu, side.gpuFloorPercent)?.let { gpuFloor.setFloorLevel(gpu.policyPath, it) }
         }
     }
+
+    private fun gpuFloorLevel(gpu: CpuPolicyInfo, percent: Int): Int? =
+        gpuFloor.readCeilingLevel(gpu.policyPath)?.let { gpuFloorLevelFor(gpu, percent, it) }
 
     private fun reapplyControlsReleasedByCaps(policies: List<CpuPolicyInfo>, side: SideControlState) {
         reapplyGpuControl(policies, side)

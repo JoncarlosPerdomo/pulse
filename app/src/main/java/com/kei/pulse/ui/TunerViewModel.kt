@@ -10,7 +10,6 @@ import com.kei.pulse.data.FailureReason
 import com.kei.pulse.data.GlobalTuning
 import com.kei.pulse.data.SideControlEdit
 import com.kei.pulse.data.TuningOutcome
-import com.kei.pulse.data.GpuFloorController
 import com.kei.pulse.data.RefreshRateController
 import com.kei.pulse.data.TelemetryReader
 import com.kei.pulse.data.TelemetrySnapshot
@@ -154,7 +153,6 @@ class TunerViewModel(
     private val displayController = DisplayController()
     private val governorController = GovernorController()
     private val refreshRateController = RefreshRateController()
-    private val gpuFloorController = GpuFloorController()
 
     private val _governor = MutableStateFlow<String?>(null)
     val governor: StateFlow<String?> = _governor
@@ -751,14 +749,16 @@ class TunerViewModel(
 
         viewModelScope.launch {
             val appliedProfile = ProfileStateResolver.preferredProfileForCurrentValues(state)
-            val applyResult = repository.applyValues(
-                policies = state.policies,
-                selectedValues = state.currentValues,
-                isReset = appliedProfile?.id == ProfileStateResolver.STOCK_PROFILE_ID,
-                appliedDisplayProfileId = appliedProfile?.id ?: ProfileStateResolver.MANUAL_PROFILE_ID,
-                // A pure manual apply (no profile matched) is the user's Custom setup — snapshot it.
-                persistAsCustom = appliedProfile == null,
-            )
+            val applyResult = globalTuning.writeCapsReassertingGpu(state.policies) {
+                repository.applyValues(
+                    policies = state.policies,
+                    selectedValues = state.currentValues,
+                    isReset = appliedProfile?.id == ProfileStateResolver.STOCK_PROFILE_ID,
+                    appliedDisplayProfileId = appliedProfile?.id ?: ProfileStateResolver.MANUAL_PROFILE_ID,
+                    // A pure manual apply (no profile matched) is the user's Custom setup — snapshot it.
+                    persistAsCustom = appliedProfile == null,
+                )
+            }
             applyResult.onSuccess { outcome ->
                 edits.value = emptyMap()
                 transientMessage.value = if (outcome.verificationPassed) {
@@ -771,18 +771,10 @@ class TunerViewModel(
                 transientError.value = throwable.message ?: "Failed to apply limits"
             }
             if (applyResult.isSuccess) {
-                reapplyGpuLock()
                 repository.selectProfile(appliedProfile?.id?.takeUnless { it == ProfileStateResolver.STOCK_PROFILE_ID })
                 onApplied(appliedProfile?.name ?: "Manual")
             }
         }
-    }
-
-    /** Apply widens GPU min_pwrlevel (un-pinning a lock); re-pin it if the lock is engaged. */
-    private suspend fun reapplyGpuLock() {
-        if (!settings.value.gpuLocked) return
-        val gpu = state.value.policies.firstOrNull { it.isGpu } ?: return
-        withContext(Dispatchers.IO) { gpuFloorController.lockToCurrentCap(gpu.policyPath) }
     }
 
     fun createUserProfile(name: String, state: TunerState) {

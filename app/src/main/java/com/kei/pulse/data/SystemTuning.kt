@@ -119,6 +119,9 @@ class RefreshRateController {
  * which the kernel requires. Passing the slowest level clears the floor.
  */
 class GpuFloorController(private val shell: PrivilegedShell = PServerShell) {
+    /** The live `max_pwrlevel`: the fastest level the GPU may reach, which a floor must not be faster than. */
+    fun readCeilingLevel(kgslRoot: String): Int? = shell.run("cat $kgslRoot/max_pwrlevel")?.trim()?.toIntOrNull()
+
     fun setFloorLevel(kgslRoot: String, floorLevel: Int): Boolean {
         val path = "$kgslRoot/min_pwrlevel"
         shell.run("chmod 666 $path; echo $floorLevel > $path; chmod 444 $path")
@@ -132,7 +135,7 @@ class GpuFloorController(private val shell: PrivilegedShell = PServerShell) {
     fun lockToCurrentCap(kgslRoot: String): Int? {
         val maxP = "$kgslRoot/max_pwrlevel"
         val minP = "$kgslRoot/min_pwrlevel"
-        val level = shell.run("cat $maxP")?.trim()?.toIntOrNull() ?: return null
+        val level = readCeilingLevel(kgslRoot) ?: return null
         shell.run(
             "chmod 666 $maxP; chmod 666 $minP; " +
                 "echo $level > $maxP; echo $level > $minP; " +

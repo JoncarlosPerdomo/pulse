@@ -2,6 +2,7 @@ package com.kei.pulse.data
 
 import com.kei.pulse.model.CpuPolicyInfo
 import com.kei.pulse.root.PrivilegedShell
+import com.kei.pulse.root.RootSupport
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -27,7 +28,7 @@ class ThorPolicyWritesTest {
     )
     private val commands = mutableListOf<String>()
     private val shell = PrivilegedShell { command ->
-        assertTrue("PServer truncates ${command.length} characters: $command", command.length <= 255)
+        assertTrue("PServer truncates ${command.length} characters: $command", command.length <= RootSupport.PSERVER_COMMAND_LIMIT)
         commands += command
         when {
             "scaling_available_governors" in command -> "walt performance powersave"

@@ -48,6 +48,14 @@ data class PerAppConfig(
         get() = profileBinding != null || fanMode != null || refreshRateHz != null || gpuFloorPercent != null
 
     /**
+     * Whether the app takes over the clocks when it comes to the front. An app explicitly toggled to AUTO_OFF runs
+     * no AutoTDP and behaves like a neutral app even when the global default is on; it still engages for a fan,
+     * refresh-rate or GPU floor extra, which apply even though its AUTO_OFF "profile" is skipped.
+     */
+    val engages: Boolean
+        get() = !isAutoOff(profileBinding) || fanMode != null || refreshRateHz != null || gpuFloorPercent != null
+
+    /**
      * Fold one live battery-draw sample (W) into the measured peak/avg, returning the updated config.
      * Only [active] samples count: idle/menu/paused draw (≈0.5 W) would otherwise drag the average down and
      * inflate the battery-life estimate (a 7 W game once read as ≈13 h because a long pause averaged in). The

@@ -30,8 +30,9 @@ internal fun capsInForce(
             continue
         }
         val nearestDistance = policy.supportedFrequencies.minOfOrNull { abs(it.toLong() - target) }
-        val matches = live == target || (live in policy.supportedFrequencies &&
-            abs(live.toLong() - target) == nearestDistance)
+        val uncapped = target >= (policy.supportedFrequencies.maxOrNull() ?: Int.MAX_VALUE)
+        val matches = (uncapped && live >= target) || live == target ||
+            (live in policy.supportedFrequencies && abs(live.toLong() - target) == nearestDistance)
         if (!matches) return TuningInForce.NotApplied
     }
     return if (missing) TuningInForce.Unverified else TuningInForce.Applied

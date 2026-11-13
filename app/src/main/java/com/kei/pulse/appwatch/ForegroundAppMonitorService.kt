@@ -1130,10 +1130,11 @@ class ForegroundAppMonitorService : Service() {
     /** Re-assert the held Custom/tier caps ~every other tick (≈2s), the same locked path AutoTDP re-asserts on. */
     private suspend fun reassertBoundCaps() {
         val freqs = boundReassertFreqs
-        if (freqs.isEmpty() || autoTdpPackage != null) return
+        val config = boundConfig
+        if (config == null || autoTdpPackage != null) return
         if (boundReassertTick++ % 2 != 0) return
         val policies = ensurePolicies()
-        container.globalTuning.applyBindingCaps(policies, boundConfig?.gpuFloorPercent) {
+        container.globalTuning.writeCapsReassertingGpuUnderOwnership(policies, config.gpuFloorPercent) {
             AutoTuneController.applyFreqsToDevice(policies, freqs)
         }
     }
@@ -1713,16 +1714,10 @@ class ForegroundAppMonitorService : Service() {
                 .firstOrNull { it.packageName == foreground }
             // Global default: AutoTDP also engages for any foreground app (except PULSE + the home
             // screen) when the user turned it on — games, emulators, and media alike.
-            // An app explicitly toggled to AUTO_OFF runs NO AutoTDP — it must behave like a neutral app even
-            // when the global default is on (QA bug #1 device half). An AUTO_OFF config still engages only if it
-            // carries a fan/refresh extra (applyConfig applies those; its AUTO_OFF "profile" is skipped there).
-            val explicitlyOff = config != null && PerAppConfig.isAutoOff(config.profileBinding)
-            val configEngages = config != null &&
-                !(explicitlyOff && config.fanMode == null && config.refreshRateHz == null && config.gpuFloorPercent == null)
             val autoDefault = config == null &&
                 container.settingsStorage.settings.first().autoTdpDefaultEnabled &&
                 isGlobalAutoTdpTarget(foreground)
-            val engages = configEngages || autoDefault
+            val engages = config?.engages == true || autoDefault
             when {
                 engages && (boundPackage != foreground || force) -> {
                     // Release any prior AutoTDP session first (e.g. switching directly between apps).
@@ -1791,7 +1786,7 @@ class ForegroundAppMonitorService : Service() {
     private suspend fun applyConfig(config: PerAppConfig) {
         val parts = mutableListOf<String>()
         val tier = PerAppConfig.tierFromBinding(config.profileBinding)
-        container.globalTuning.applyBindingCaps(ensurePolicies(), config.gpuFloorPercent) {
+        container.globalTuning.writeCapsReassertingGpuUnderOwnership(ensurePolicies(), config.gpuFloorPercent) {
             when {
                 tier == PowerTier.CUSTOM -> {
                     // Custom = the user's saved Custom setup, same as the Custom tier in-app.
@@ -1867,7 +1862,7 @@ class ForegroundAppMonitorService : Service() {
 
     private suspend fun restoreSnapshot(notify: Boolean = true) {
         val restore = container.perAppConfigStorage.restoreState.first() ?: return
-        container.globalTuning.applyBindingCaps(ensurePolicies()) {
+        container.globalTuning.writeCapsReassertingGpuUnderOwnership(ensurePolicies()) {
             if (restore.values.isNotEmpty()) {
                 container.repository.applyRawValues(restore.values, restore.appliedDisplayProfileId)
             }

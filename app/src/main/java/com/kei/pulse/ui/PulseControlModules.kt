@@ -79,6 +79,7 @@ import com.kei.pulse.data.GlobalTuning.Companion.gpuFloorMhz
 import com.kei.pulse.model.ClockOwner
 import com.kei.pulse.model.CpuPolicyInfo
 import com.kei.pulse.model.PowerTier
+import com.kei.pulse.model.SideControlState
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 
@@ -837,7 +838,7 @@ fun GpuFloorModule(
     onToggleLock: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val options = listOf(0, 25, 50, 75)
+    val options = SideControlState.FLOOR_PERCENT_OPTIONS
     Column(modifier = modifier.fillMaxWidth()) {
         PulseSectionLabel("GPU FLOOR")
         Row(
@@ -1120,7 +1121,7 @@ fun AutoTdpModule(
 /** CPU minimum-clock floor selector. 0 = no floor. Mirrors the GPU floor. */
 @Composable
 fun CpuFloorModule(currentPercent: Int, onSelect: (Int) -> Unit, modifier: Modifier = Modifier) {
-    val options = listOf(0, 25, 50, 75)
+    val options = SideControlState.FLOOR_PERCENT_OPTIONS
     Column(modifier = modifier.fillMaxWidth()) {
         PulseSectionLabel("CPU FLOOR")
         Row(
