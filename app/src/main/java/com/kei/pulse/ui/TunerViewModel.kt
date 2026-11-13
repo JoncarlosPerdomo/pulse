@@ -755,25 +755,31 @@ class TunerViewModel(
                     selectedValues = state.currentValues,
                     isReset = appliedProfile?.id == ProfileStateResolver.STOCK_PROFILE_ID,
                     appliedDisplayProfileId = appliedProfile?.id ?: ProfileStateResolver.MANUAL_PROFILE_ID,
-                    // A pure manual apply (no profile matched) is the user's Custom setup — snapshot it.
                     persistAsCustom = appliedProfile == null,
                 )
             }
-            applyResult.onSuccess { outcome ->
-                edits.value = emptyMap()
-                transientMessage.value = if (outcome.verificationPassed) {
-                    buildAppliedMessage(appliedProfile, outcome.commandOutput)
-                } else {
-                    buildVerificationFailureMessage(state, outcome.actualValues, outcome.commandOutput)
+            when (applyResult) {
+                TuningOutcome.Blocked -> {
+                    transientError.value = "A game owns the clocks. Limits not applied"
+                    return@launch
                 }
-                transientError.value = null
-            }.onFailure { throwable ->
-                transientError.value = throwable.message ?: "Failed to apply limits"
+                is TuningOutcome.Failed -> {
+                    transientError.value = applyResult.message ?: "Failed to apply limits"
+                    return@launch
+                }
+                TuningOutcome.Deferred -> return@launch
+                is TuningOutcome.Applied -> Unit
             }
-            if (applyResult.isSuccess) {
-                repository.selectProfile(appliedProfile?.id?.takeUnless { it == ProfileStateResolver.STOCK_PROFILE_ID })
-                onApplied(appliedProfile?.name ?: "Manual")
+            val outcome = applyResult.caps ?: return@launch
+            edits.value = emptyMap()
+            transientMessage.value = if (outcome.verificationPassed) {
+                buildAppliedMessage(appliedProfile, outcome.commandOutput)
+            } else {
+                buildVerificationFailureMessage(state, outcome.actualValues, outcome.commandOutput)
             }
+            transientError.value = null
+            repository.selectProfile(appliedProfile?.id?.takeUnless { it == ProfileStateResolver.STOCK_PROFILE_ID })
+            onApplied(appliedProfile?.name ?: "Manual")
         }
     }
 

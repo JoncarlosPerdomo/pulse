@@ -1130,8 +1130,8 @@ class ForegroundAppMonitorService : Service() {
     /** Re-assert the held Custom/tier caps ~every other tick (≈2s), the same locked path AutoTDP re-asserts on. */
     private suspend fun reassertBoundCaps() {
         val freqs = boundReassertFreqs
-        val config = boundConfig
-        if (config == null || autoTdpPackage != null) return
+        val config = boundConfig ?: return
+        if (!shouldReassertBoundCaps(config, autoTdpPackage)) return
         if (boundReassertTick++ % 2 != 0) return
         val policies = ensurePolicies()
         container.globalTuning.writeCapsReassertingGpuUnderOwnership(policies, config.gpuFloorPercent) {
@@ -1983,3 +1983,6 @@ class ForegroundAppMonitorService : Service() {
         }
     }
 }
+
+internal fun shouldReassertBoundCaps(config: PerAppConfig?, autoTdpPackage: String?): Boolean =
+    config?.engages == true && autoTdpPackage == null

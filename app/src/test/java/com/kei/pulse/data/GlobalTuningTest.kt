@@ -173,6 +173,33 @@ class GlobalTuningTest {
     }
 
     @Test
+    fun `a bound game blocks manual apply without any writes`() = runTest {
+        for (autoTdp in listOf(false, true)) {
+            ownership.owner = ClockOwner.BoundGame(autoTdp)
+            val outcome = tuning.writeCapsReassertingGpu(policies) {
+                caps.applyCaps(policies, emptyMap(), false, false)
+            }
+            assertEquals(TuningOutcome.Blocked, outcome)
+            assertTrue(caps.calls.isEmpty())
+            assertTrue(shell.commands.isEmpty())
+            assertEquals(0, ownership.capsWrittenCount)
+        }
+    }
+
+    @Test
+    fun `manual apply releases global AutoTDP before writing and restoring the floor`() = runTest {
+        ownership.owner = ClockOwner.GlobalAutoTdp
+        store.state = TuningState(PowerTier.CUSTOM, SideControlState.CLEARED.copy(gpuFloorPercent = 75))
+        val outcome = tuning.writeCapsReassertingGpu(policies) {
+            caps.applyCaps(policies, emptyMap(), false, false)
+        }
+        assertTrue(outcome is TuningOutcome.Applied)
+        assertEquals(listOf("release", "caps", "shell"), events.distinct())
+        assertTrue(shell.wrote("min_pwrlevel", "echo 1"))
+        assertEquals(1, ownership.capsWrittenCount)
+    }
+
+    @Test
     fun `a failed profile apply reports the write failure`() = runTest {
         caps.profileFailure = IllegalStateException("Profile is unavailable")
 
@@ -330,7 +357,7 @@ class GlobalTuningTest {
     fun `cap writes from outside the locks enter clock ownership but holders of it do not re-enter`() = runTest {
         store.state = TuningState(PowerTier.CUSTOM, SideControlState.CLEARED.copy(gpuFloorPercent = 75))
 
-        tuning.writeCapsReassertingGpu(policies) {}
+        tuning.writeCapsReassertingGpu(policies) { caps.applyCaps(policies, emptyMap(), false, false) }
         assertEquals(1, ownership.entries)
         assertTrue(shell.wrote("min_pwrlevel", "echo 1"))
 

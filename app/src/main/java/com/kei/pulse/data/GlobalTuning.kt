@@ -52,10 +52,7 @@ sealed interface TuningOutcome {
     /** A side-control edit saved, but not written: AutoTDP owns the clocks. */
     data object Deferred : TuningOutcome
 
-    /**
-     * A Tier switch neither saved nor written: a bound game owns the clocks, and its exit restore would put back
-     * the pre-game Tier and caps anyway, leaving any saved side controls out of step with them.
-     */
+    /** A global cap apply or Tier switch was neither saved nor written because a bound game owns the clocks. */
     data object Blocked : TuningOutcome
 
     data class Failed(val reason: FailureReason, val message: String? = null) : TuningOutcome
@@ -207,31 +204,38 @@ class GlobalTuning(
     suspend fun applyProfile(profileId: String): TuningOutcome = withContext(Dispatchers.IO) {
         mutex.withLock {
             val policies = caps.policies()
-            ownership().withOwnership {
-                when (owner) {
-                    is ClockOwner.BoundGame -> return@withOwnership TuningOutcome.Blocked
-                    ClockOwner.GlobalAutoTdp -> releaseGlobalAutoTdp()
-                    ClockOwner.Free -> Unit
-                }
-                val outcome = writeCapsReassertingGpuUnderOwnership(policies) { caps.applyDisplayProfileById(profileId) }.toOutcome()
-                capsWritten()
-                outcome
+            withManualClockOwnership {
+                writeCapsReassertingGpuUnderOwnership(policies) { caps.applyDisplayProfileById(profileId) }.toOutcome()
             }
         }
     }
 
+    private suspend fun withManualClockOwnership(write: suspend () -> TuningOutcome): TuningOutcome =
+        ownership().withOwnership {
+            when (owner) {
+                is ClockOwner.BoundGame -> return@withOwnership TuningOutcome.Blocked
+                ClockOwner.GlobalAutoTdp -> releaseGlobalAutoTdp()
+                ClockOwner.Free -> Unit
+            }
+            val outcome = write()
+            capsWritten()
+            outcome
+        }
+
     /**
-     * Runs [writeCaps], then re-pins the GPU lock or floor that the cap write released. A non-null [gpuFloorPercent]
-     * is a per-app binding's floor and replaces the global lock and floor for this write. For callers that hold
-     * neither this module's lock nor clock ownership; the global tuning it reads can't change mid-write.
+     * Runs [writeCaps] and restores the GPU lock or floor under global tuning and clock ownership.
+     * A bound game blocks the write; following-global AutoTDP is released before the write.
+     * Callers must hold neither this module's mutex nor clock ownership.
      */
-    suspend fun <T> writeCapsReassertingGpu(
+    suspend fun writeCapsReassertingGpu(
         policies: List<CpuPolicyInfo>,
         gpuFloorPercent: Int? = null,
-        writeCaps: suspend () -> T,
-    ): T = withContext(Dispatchers.IO) {
+        writeCaps: suspend () -> Result<PerformanceRepository.ApplyOutcome>,
+    ): TuningOutcome = withContext(Dispatchers.IO) {
         mutex.withLock {
-            ownership().withOwnership { writeCapsReassertingGpuUnderOwnership(policies, gpuFloorPercent, writeCaps) }
+            withManualClockOwnership {
+                writeCapsReassertingGpuUnderOwnership(policies, gpuFloorPercent, writeCaps).toOutcome()
+            }
         }
     }
 
