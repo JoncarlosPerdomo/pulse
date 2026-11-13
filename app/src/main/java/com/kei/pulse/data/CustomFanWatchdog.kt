@@ -13,13 +13,15 @@ class CustomFanWatchdog(
     private val now: () -> Long = { System.nanoTime() / NANOS_PER_MS },
     private val launch: (String) -> String?,
 ) {
-    sealed interface State {
+    internal sealed interface State {
         data object Idle : State
         data class Armed(val lastBeatMs: Long) : State
         data class BackingOff(val retryAtMs: Long) : State
     }
 
-    enum class Step { Wait, Relaunch, Beat }
+    internal enum class Action { Beat, Launch, Withhold }
+
+    internal enum class Arming { Succeeded, Failed }
 
     private var state: State = State.Idle
 
@@ -29,16 +31,21 @@ class CustomFanWatchdog(
      */
     @Synchronized
     fun startOrBeatBeforeDriving(): Boolean {
-        val step = step(state, now())
-        if (step == Step.Wait) return false
-        val armed = try {
-            writeHeartbeat(now())
-            step == Step.Beat || launch(script(heartbeat.absolutePath))?.trim() == STARTED
+        val nowMs = now()
+        val action = actionFor(state, nowMs)
+        if (action == Action.Withhold) return false
+        val arming = try {
+            writeHeartbeat(nowMs)
+            if (action == Action.Beat || launch(script(heartbeat.absolutePath))?.trim() == STARTED) {
+                Arming.Succeeded
+            } else {
+                Arming.Failed
+            }
         } catch (_: IOException) {
-            false
+            Arming.Failed
         }
-        state = if (armed) State.Armed(now()) else State.BackingOff(now() + BACKOFF_MS)
-        return armed
+        state = next(state, nowMs, arming)
+        return arming == Arming.Succeeded
     }
 
     @Synchronized
@@ -54,44 +61,67 @@ class CustomFanWatchdog(
 
     companion object {
         private const val NANOS_PER_MS = 1_000_000L
-        private const val CHECK_INTERVAL_SECONDS = 1
-        private const val STALE_CHECKS = 5
+        private const val MS_PER_SECOND = 1_000L
+        private const val MS_PER_UPTIME_CENTISECOND = 10L
+        private const val CHECK_INTERVAL_SECONDS = 1L
 
-        /** How often the service ticks, and so how often it beats. */
-        const val POLL_INTERVAL_MS = 1_000L
+        /**
+         * The script restores Smart once the heartbeat has not changed for this long, measured on its own
+         * clock. A beat this late means the script may already have given up, so Pulse relaunches it; any
+         * sooner and a slow tick would displace a watcher that is still waiting.
+         */
+        internal const val STALE_AFTER_MS = 5 * MS_PER_SECOND
+        internal const val BACKOFF_MS = STALE_AFTER_MS
 
-        /** The script restores Smart once the heartbeat has not changed for this long. */
-        const val STALE_AFTER_MS = STALE_CHECKS * CHECK_INTERVAL_SECONDS * 1_000L
+        internal const val STARTED = "STARTED"
+        internal const val LOCK_PATH = "/data/local/tmp/pulse-fan-watchdog.lock"
 
-        /** A gap this long between beats leaves less than one tick before the script restores Smart. */
-        const val RELAUNCH_AFTER_MS = STALE_AFTER_MS - POLL_INTERVAL_MS
-        const val BACKOFF_MS = STALE_AFTER_MS
-
-        const val STARTED = "STARTED"
-        const val LOCK_PATH = "/data/local/tmp/pulse-fan-watchdog.lock"
-
-        fun step(state: State, nowMs: Long): Step = when (state) {
-            State.Idle -> Step.Relaunch
-            is State.Armed -> if (nowMs - state.lastBeatMs >= RELAUNCH_AFTER_MS) Step.Relaunch else Step.Beat
-            is State.BackingOff -> if (nowMs >= state.retryAtMs) Step.Relaunch else Step.Wait
+        internal fun actionFor(state: State, nowMs: Long): Action = when (state) {
+            State.Idle -> Action.Launch
+            is State.Armed -> if (nowMs - state.lastBeatMs >= STALE_AFTER_MS) Action.Launch else Action.Beat
+            is State.BackingOff -> if (nowMs >= state.retryAtMs) Action.Launch else Action.Withhold
         }
 
-        fun script(heartbeatPath: String, lockPath: String = LOCK_PATH): String {
+        internal fun next(state: State, nowMs: Long, arming: Arming?): State = when (arming) {
+            Arming.Succeeded -> State.Armed(nowMs)
+            Arming.Failed -> State.BackingOff(nowMs + BACKOFF_MS)
+            null -> state
+        }
+
+        internal fun script(
+            heartbeatPath: String,
+            lockPath: String = LOCK_PATH,
+            staleAfterMs: Long = STALE_AFTER_MS,
+        ): String {
             val heartbeat = SysfsBatch.shellQuote(heartbeatPath)
+            val bounceMode = FanController.bounceModeFor(FanController.SMART)
             return """
                 heartbeat=$heartbeat
                 lock=${SysfsBatch.shellQuote(lockPath)}
+                restoring=${SysfsBatch.shellQuote("$lockPath.restoring")}
                 if [ "${'$'}1" != watch ]; then
                     setsid sh "${'$'}0" watch </dev/null >/dev/null 2>&1 &
                     echo $STARTED
                     exit
                 fi
-                missing_pid_checks=0
+                restore_smart() {
+                    trap '' TERM
+                    : > "${'$'}restoring"
+                    ${FanController.vendorModeCommand(FanController.SMART)}
+                    rm -f "${'$'}restoring"
+                    trap - TERM
+                }
+                read_clock() {
+                    read uptime _ < /proc/uptime
+                    now_ms=${'$'}(( ${'$'}{uptime%.*}${'$'}{uptime#*.} * $MS_PER_UPTIME_CENTISECOND ))
+                }
+                empty_lock=none
                 until mkdir "${'$'}lock" 2>/dev/null; do
                     owner_pid=${'$'}(cat "${'$'}lock/pid" 2>/dev/null)
                     if [ -z "${'$'}owner_pid" ]; then
-                        missing_pid_checks=${'$'}((missing_pid_checks + 1))
-                        if [ "${'$'}missing_pid_checks" -gt 1 ]; then rmdir "${'$'}lock" 2>/dev/null; continue; fi
+                        lock_id=${'$'}(stat -c %y "${'$'}lock" 2>/dev/null)
+                        if [ "${'$'}lock_id" = "${'$'}empty_lock" ]; then rmdir "${'$'}lock" 2>/dev/null; continue; fi
+                        empty_lock=${'$'}lock_id
                     elif tr '\000' ' ' < /proc/"${'$'}owner_pid"/cmdline 2>/dev/null | grep -F "${'$'}0 watch" >/dev/null; then
                         kill "${'$'}owner_pid"
                     else
@@ -103,22 +133,22 @@ class CustomFanWatchdog(
                 done
                 echo ${'$'}${'$'} > "${'$'}lock/pid"
                 trap 'rm -f "${'$'}lock/pid"; rmdir "${'$'}lock"' EXIT
+                if [ -e "${'$'}restoring" ] && [ "${'$'}(settings get system fan_mode)" = $bounceMode ]; then restore_smart; fi
+                rm -f "${'$'}restoring"
                 last_beat=
-                stale_checks=0
+                read_clock
+                last_change_ms=${'$'}now_ms
                 while :; do
                     beat=${'$'}(cat "${'$'}heartbeat" 2>/dev/null)
-                    if [ -z "${'$'}beat" ] || [ "${'$'}beat" = "${'$'}last_beat" ]; then
-                        stale_checks=${'$'}((stale_checks + 1))
-                    else
-                        stale_checks=0
+                    read_clock
+                    if [ -n "${'$'}beat" ] && [ "${'$'}beat" != "${'$'}last_beat" ]; then
+                        last_beat=${'$'}beat
+                        last_change_ms=${'$'}now_ms
                     fi
-                    [ "${'$'}stale_checks" -ge $STALE_CHECKS ] && break
-                    last_beat=${'$'}beat
+                    [ ${'$'}((now_ms - last_change_ms)) -ge $staleAfterMs ] && break
                     sleep $CHECK_INTERVAL_SECONDS
                 done
-                if [ "${'$'}(settings get system fan_mode)" = ${FanController.CUSTOM} ]; then
-                    ${FanController.vendorModeCommand(FanController.SMART)}
-                fi
+                if [ "${'$'}(settings get system fan_mode)" = ${FanController.CUSTOM} ]; then restore_smart; fi
             """.trimIndent()
         }
     }

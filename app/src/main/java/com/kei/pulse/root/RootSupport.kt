@@ -2,6 +2,8 @@ package com.kei.pulse.root
 
 import android.content.Context
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -62,9 +64,11 @@ object RootSupport {
     // https://github.com/JoncarlosPerdomo/pulse/pull/2
     @android.annotation.SuppressLint("SetWorldReadable")
     private fun writeScript(scriptFile: File, scriptContents: String): File {
-        scriptFile.writeText(scriptContents)
-        scriptFile.setReadable(true, false)
-        scriptFile.setExecutable(true, false)
+        val staged = File.createTempFile("${scriptFile.name}.", ".new", scriptFile.parentFile)
+        staged.writeText(scriptContents)
+        staged.setReadable(true, false)
+        staged.setExecutable(true, false)
+        Files.move(staged.toPath(), scriptFile.toPath(), StandardCopyOption.ATOMIC_MOVE)
         return scriptFile
     }
 }
