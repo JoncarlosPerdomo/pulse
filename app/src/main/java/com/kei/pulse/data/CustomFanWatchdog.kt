@@ -58,7 +58,7 @@ class CustomFanWatchdog(
                 stale=0
                 while :; do
                     beat=${'$'}(cat "${'$'}H" 2>/dev/null)
-                    [ "${'$'}beat" = stopped ] && break
+                    [ "${'$'}beat" = stopped ] && exit
                     if [ -z "${'$'}beat" ] || [ "${'$'}beat" = "${'$'}last" ]; then
                         stale=${'$'}((stale + 1))
                     else

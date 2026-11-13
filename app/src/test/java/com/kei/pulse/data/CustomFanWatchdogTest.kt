@@ -64,6 +64,7 @@ class CustomFanWatchdogTest {
         assertTrue(script.contains("until mkdir \"\$L\""))
         assertTrue(script.contains("setsid sh \"\$0\" watch </dev/null >/dev/null 2>&1 &"))
         assertTrue(script.contains("[ \"\$stale\" -ge 5 ] && break"))
+        assertTrue(script.contains("[ \"\$beat\" = stopped ] && exit"))
         assertTrue(script.contains("[ \"\$(settings get system fan_mode)\" = 6 ]"))
         assertTrue(script.contains(FanController.vendorModeCommand(FanController.SMART)))
         assertTrue(FanController.vendorModeCommand(FanController.SMART).length <= 255)
