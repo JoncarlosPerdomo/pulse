@@ -3,8 +3,6 @@ package com.kei.pulse.automation
 import android.util.Log
 import com.kei.pulse.AppContainer
 import com.kei.pulse.data.TuningOutcome
-import com.kei.pulse.model.ClockOwner
-import com.kei.pulse.model.ClockOwnership
 import com.kei.pulse.model.PowerTier
 import com.kei.pulse.model.ProfileSource
 import kotlinx.coroutines.flow.first
@@ -22,32 +20,20 @@ internal class AutomationTargetAdapter(private val container: AppContainer) : Au
         if (matches.isEmpty()) return "failed: profile not found: $name"
         if (matches.size != 1) return "failed: ambiguous profile name: $name"
         val profile = matches.single()
-        val ownership = AppContainer.activeClockOwnership ?: ClockOwnership.FREE
-        return ownership.withOwnership {
-            if (owner is ClockOwner.BoundGame) return@withOwnership report("profile=$name", TuningOutcome.Blocked)
-            if (owner == ClockOwner.GlobalAutoTdp) releaseGlobalAutoTdp()
-            val applied = container.globalTuning.applyBindingCaps(repository.currentPolicies()) {
-                repository.applyDisplayProfileById(profile.id)
-            }.getOrElse { return@withOwnership "failed: ${it.message}" }
-            capsWritten()
-            repository.selectProfile(profile.id)
-            report("profile=$name caps_khz=${profile.maxFrequencies}", TuningOutcome.Applied(caps = applied))
-        }
+        val outcome = container.globalTuning.applyProfile(profile.id)
+        if (outcome is TuningOutcome.Applied) repository.selectProfile(profile.id)
+        return report("profile=$name caps_khz=${profile.maxFrequencies}", outcome)
     }
 
     override suspend fun query(): String {
         val policies = container.repository.currentPolicies()
         if (policies.isEmpty()) return "failed: no policies detected"
-        val cpuPaths = policies.filterNot { it.isGpu }.associate {
-            "policy${it.id}.scaling_max_freq" to "${it.policyPath}/scaling_max_freq"
-        }
         val gpu = policies.firstOrNull { it.isGpu }
-        val paths = cpuPaths + listOf("max_pwrlevel", "min_pwrlevel").associate { node ->
-            "gpu.$node" to gpu?.let { "${it.policyPath}/$node" }
-        }
-        val readback = container.sysfsReader.readAll(paths.values.filterNotNull())
+        val nodes = policies.filterNot { it.isGpu }.map { "policy${it.id}.scaling_max_freq" to "${it.policyPath}/scaling_max_freq" } +
+            listOf("max_pwrlevel", "min_pwrlevel").mapNotNull { node -> gpu?.let { "gpu.$node" to "${it.policyPath}/$node" } }
+        val readback = container.sysfsReader.readAll(nodes.map { it.second })
         val tier = container.settingsStorage.settings.first().activeTierLabel
-        return "tier=$tier; " + paths.entries.joinToString("; ") { (key, path) ->
+        return "tier=$tier; " + nodes.joinToString("; ") { (key, path) ->
             "$key=${readback[path]?.trim()?.toIntOrNull() ?: "unavailable"}"
         }
     }

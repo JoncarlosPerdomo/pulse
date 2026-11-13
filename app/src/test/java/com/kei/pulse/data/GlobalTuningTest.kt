@@ -147,6 +147,42 @@ class GlobalTuningTest {
     }
 
     @Test
+    fun `a bound game blocks a profile apply`() = runTest {
+        ownership.owner = ClockOwner.BoundGame(autoTdp = false)
+
+        assertEquals(TuningOutcome.Blocked, tuning.applyProfile("saved"))
+
+        assertTrue(caps.profileCalls.isEmpty())
+        assertTrue(shell.commands.isEmpty())
+        assertEquals(0, ownership.capsWrittenCount)
+    }
+
+    @Test
+    fun `a profile apply releases following-global AutoTDP then reasserts the global GPU floor`() = runTest {
+        store.state = TuningState(PowerTier.CUSTOM, SideControlState.CLEARED.copy(gpuFloorPercent = 75))
+        ownership.owner = ClockOwner.GlobalAutoTdp
+
+        val outcome = tuning.applyProfile("saved")
+
+        assertTrue(outcome is TuningOutcome.Applied)
+        assertEquals(listOf("saved"), caps.profileCalls)
+        assertEquals(listOf("release", "caps", "shell"), events.distinct())
+        assertTrue(shell.wrote("min_pwrlevel", "echo 1"))
+        assertEquals(1, ownership.capsWrittenCount)
+        assertEquals(PowerTier.CUSTOM, store.state.tier)
+    }
+
+    @Test
+    fun `a failed profile apply reports the write failure`() = runTest {
+        caps.profileFailure = IllegalStateException("Profile is unavailable")
+
+        assertEquals(
+            TuningOutcome.Failed(FailureReason.WRITE_FAILED, "Profile is unavailable"),
+            tuning.applyProfile("gone"),
+        )
+    }
+
+    @Test
     fun `a Power Target edit on Max switches to Custom and snapshots it`() = runTest {
         store.state = TuningState(PowerTier.MAX, SideControlState.CLEARED)
 
@@ -345,6 +381,8 @@ class GlobalTuningTest {
     ) : CapWriter {
         val calls = mutableListOf<CapsCall>()
         var failing: (Map<Int, Int>) -> Boolean = { false }
+        val profileCalls = mutableListOf<String>()
+        var profileFailure: Throwable? = null
         override val isAvailable = true
         override fun policies() = policies
 
@@ -360,6 +398,13 @@ class GlobalTuningTest {
             store.last = values
             if (persistAsCustom) store.custom = values
             return Result.success(PerformanceRepository.ApplyOutcome(values, verificationPassed = true, commandOutput = null))
+        }
+
+        override suspend fun applyDisplayProfileById(profileId: String): Result<PerformanceRepository.ApplyOutcome> {
+            profileCalls += profileId
+            events += "caps"
+            profileFailure?.let { return Result.failure(it) }
+            return Result.success(PerformanceRepository.ApplyOutcome(emptyMap(), verificationPassed = true, commandOutput = null))
         }
     }
 

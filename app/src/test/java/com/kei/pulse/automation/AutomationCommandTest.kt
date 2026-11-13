@@ -2,14 +2,20 @@ package com.kei.pulse.automation
 
 import com.kei.pulse.data.FailureReason
 import com.kei.pulse.data.PerformanceRepository
+import android.app.Activity
 import com.kei.pulse.data.TuningOutcome
+import com.kei.pulse.model.AppSettings
 import com.kei.pulse.model.PowerTier
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AutomationCommandTest {
+    private val enabled = AppSettings(automationEnabled = true, pulseEnabled = true)
+
     private class Target : AutomationTarget {
         val calls = mutableListOf<String>()
         var writeResult = "applied"
@@ -27,30 +33,35 @@ class AutomationCommandTest {
         }
     }
 
-    @Test fun tierAliasesDispatchToTheExpectedTier() = runTest {
-        val aliases = mapOf(
-            "AAA" to PowerTier.MAX, "Max" to PowerTier.MAX, "AAA / Max" to PowerTier.MAX,
-            " balanced " to PowerTier.BALANCED, "power_saving" to PowerTier.POWER_SAVING,
-            "Power Saving" to PowerTier.POWER_SAVING, "Custom" to PowerTier.CUSTOM,
+    @Test fun tierNamesDispatchToTheExpectedTier() = runTest {
+        val names = mapOf(
+            "max" to PowerTier.MAX, "Max" to PowerTier.MAX, " balanced " to PowerTier.BALANCED,
+            "power_saving" to PowerTier.POWER_SAVING, "Custom" to PowerTier.CUSTOM,
         )
-        for ((alias, tier) in aliases) {
+        for ((name, tier) in names) {
             val target = Target()
-            val command = parseAutomationCommand("com.kei.pulse.action.SET_TIER", mapOf("tier" to alias))
-            assertEquals("applied", dispatchAutomationCommand(true, command, target))
+            val command = parseAutomationCommand("com.kei.pulse.action.SET_TIER", mapOf("tier" to name))
+            assertEquals("applied", dispatchAutomationCommand(enabled, command, target))
             assertEquals(listOf("tier=$tier"), target.calls)
         }
     }
 
     @Test fun disabledCommandsNeverReachTheTarget() = runTest {
-        val target = Target()
         val commands = listOf(
             AutomationCommand.Query, AutomationCommand.SetTier(PowerTier.MAX),
             AutomationCommand.ApplyProfile("Game"), AutomationCommand.Invalid("unknown action"),
         )
-        for (command in commands) {
-            assertTrue(dispatchAutomationCommand(false, command, target).startsWith("disabled:"))
+        val gates = mapOf(
+            AppSettings(automationEnabled = false, pulseEnabled = true) to "disabled: enable Allow automation broadcasts in Settings",
+            AppSettings(automationEnabled = true, pulseEnabled = false) to "disabled: PULSE master switch is off",
+        )
+        for ((settings, expected) in gates) {
+            val target = Target()
+            for (command in commands) {
+                assertEquals(expected, dispatchAutomationCommand(settings, command, target))
+            }
+            assertTrue(target.calls.isEmpty())
         }
-        assertTrue(target.calls.isEmpty())
     }
 
     @Test fun invalidInputsNeverDispatch() = runTest {
@@ -60,11 +71,13 @@ class AutomationCommandTest {
             parseAutomationCommand("other", emptyMap()),
             parseAutomationCommand("com.kei.pulse.action.SET_TIER", emptyMap()),
             parseAutomationCommand("com.kei.pulse.action.SET_TIER", mapOf("tier" to "turbo")),
+            parseAutomationCommand("com.kei.pulse.action.SET_TIER", mapOf("tier" to "AAA / Max")),
+            parseAutomationCommand("com.kei.pulse.action.SET_TIER", mapOf("tier" to "power saving")),
             parseAutomationCommand("com.kei.pulse.action.APPLY_PROFILE", emptyMap()),
             parseAutomationCommand("com.kei.pulse.action.APPLY_PROFILE", mapOf("name" to " ")),
         )
         for (command in commands) {
-            assertTrue(dispatchAutomationCommand(true, command, target).startsWith("invalid:"))
+            assertTrue(dispatchAutomationCommand(enabled, command, target).startsWith("invalid:"))
         }
         assertTrue(target.calls.isEmpty())
     }
@@ -74,7 +87,7 @@ class AutomationCommandTest {
             "deferred: AutoTDP owns clocks", "failed: profile not found: My Game")) {
             val target = Target().apply { writeResult = result }
             val command = parseAutomationCommand("com.kei.pulse.action.APPLY_PROFILE", mapOf("name" to "My Game"))
-            assertEquals(result, dispatchAutomationCommand(true, command, target))
+            assertEquals(result, dispatchAutomationCommand(enabled, command, target))
             assertEquals(listOf("profile=My Game"), target.calls)
         }
     }
@@ -84,7 +97,7 @@ class AutomationCommandTest {
         val command = parseAutomationCommand("com.kei.pulse.action.QUERY", emptyMap())
         assertEquals(
             "tier=Balanced; policy0.scaling_max_freq=2000000; gpu.max_pwrlevel=3; gpu.min_pwrlevel=13",
-            dispatchAutomationCommand(true, command, target),
+            dispatchAutomationCommand(enabled, command, target),
         )
         assertEquals(listOf("query"), target.calls)
     }
@@ -95,9 +108,37 @@ class AutomationCommandTest {
         assertEquals("failed: WRITE_FAILED: denied", formatAutomationOutcome(
             "tier=Max", TuningOutcome.Failed(FailureReason.WRITE_FAILED, "denied"),
         ))
-        assertEquals("failed: cap verification failed", formatAutomationOutcome(
+        assertEquals("failed: caps written but verification failed", formatAutomationOutcome(
             "tier=Max", TuningOutcome.Applied(caps = PerformanceRepository.ApplyOutcome(emptyMap(), false, null)),
         ))
         assertEquals("applied: tier=Max", formatAutomationOutcome("tier=Max", TuningOutcome.Applied()))
+    }
+
+    @Test fun onlyAppliedAndQueryResultsAreOk() {
+        val ok = listOf("applied: tier=Max", "tier=Balanced; policy0.scaling_max_freq=1")
+        val rejected = listOf(
+            "disabled: PULSE master switch is off", "blocked: bound game owns clocks",
+            "deferred: still applying", "failed: WRITE_FAILED", "invalid: name is required",
+        )
+        ok.forEach { assertEquals(Activity.RESULT_OK, automationResultCode(it)) }
+        rejected.forEach { assertEquals(Activity.RESULT_FIRST_USER, automationResultCode(it)) }
+    }
+
+    @Test fun slowWorkReportsStillApplyingButIsNeverCancelled() = runTest {
+        var finished = false
+        val result = runWithinBudget(this, 8_000) {
+            delay(20_000)
+            finished = true
+            "applied: tier=Max"
+        }
+
+        assertEquals(STILL_APPLYING, result)
+        assertFalse(finished)
+        delay(20_000)
+        assertTrue(finished)
+    }
+
+    @Test fun fastWorkReturnsItsResult() = runTest {
+        assertEquals("applied: tier=Max", runWithinBudget(this, 8_000) { "applied: tier=Max" })
     }
 }

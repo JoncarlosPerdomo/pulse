@@ -1,7 +1,12 @@
 package com.kei.pulse.automation
 
+import android.app.Activity
 import com.kei.pulse.data.TuningOutcome
+import com.kei.pulse.model.AppSettings
 import com.kei.pulse.model.PowerTier
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.withTimeoutOrNull
 
 internal sealed interface AutomationCommand {
     data class SetTier(val tier: PowerTier) : AutomationCommand
@@ -12,14 +17,9 @@ internal sealed interface AutomationCommand {
 
 internal fun parseAutomationCommand(action: String?, extras: Map<String, String?>): AutomationCommand = when (action) {
     "com.kei.pulse.action.SET_TIER" -> {
-        val tier = when (extras["tier"]?.trim()?.lowercase()) {
-            "max", "aaa", "aaa/max", "aaa / max" -> PowerTier.MAX
-            "balanced" -> PowerTier.BALANCED
-            "power_saving", "power saving" -> PowerTier.POWER_SAVING
-            "custom" -> PowerTier.CUSTOM
-            else -> null
-        }
-        tier?.let(AutomationCommand::SetTier)
+        val name = extras["tier"]?.trim()
+        PowerTier.entries.firstOrNull { it.name.equals(name, ignoreCase = true) }
+            ?.let(AutomationCommand::SetTier)
             ?: AutomationCommand.Invalid("tier must be max, balanced, power_saving, or custom")
     }
     "com.kei.pulse.action.APPLY_PROFILE" -> extras["name"]?.takeIf { it.isNotBlank() }
@@ -35,11 +35,12 @@ internal interface AutomationTarget {
 }
 
 internal suspend fun dispatchAutomationCommand(
-    enabled: Boolean,
+    settings: AppSettings,
     command: AutomationCommand,
     target: AutomationTarget,
 ): String {
-    if (!enabled) return "disabled: enable Allow automation broadcasts in Settings"
+    if (!settings.automationEnabled) return "disabled: enable Allow automation broadcasts in Settings"
+    if (!settings.pulseEnabled) return "disabled: PULSE master switch is off"
     return when (command) {
         is AutomationCommand.Invalid -> "invalid: ${command.message}"
         is AutomationCommand.SetTier -> target.setTier(command.tier)
@@ -53,8 +54,20 @@ internal fun formatAutomationOutcome(write: String, outcome: TuningOutcome): Str
     TuningOutcome.Deferred -> "deferred: AutoTDP owns clocks"
     is TuningOutcome.Failed -> "failed: ${outcome.reason}${outcome.message?.let { ": $it" } ?: ""}"
     is TuningOutcome.Applied -> if (outcome.caps?.verificationPassed == false) {
-        "failed: cap verification failed"
+        "failed: caps written but verification failed"
     } else {
         "applied: $write"
     }
+}
+
+private val rejectedPrefixes = listOf("disabled:", "blocked:", "deferred:", "failed:", "invalid:")
+
+internal fun automationResultCode(result: String): Int =
+    if (rejectedPrefixes.any(result::startsWith)) Activity.RESULT_FIRST_USER else Activity.RESULT_OK
+
+internal const val STILL_APPLYING = "deferred: still applying"
+
+internal suspend fun runWithinBudget(scope: CoroutineScope, budgetMs: Long, work: suspend () -> String): String {
+    val pending = scope.async { work() }
+    return withTimeoutOrNull(budgetMs) { pending.await() } ?: STILL_APPLYING
 }

@@ -49,11 +49,9 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -62,11 +60,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.kei.pulse.data.SettingsStorage
 import com.kei.pulse.model.AppColorSource
 import com.kei.pulse.model.OverlayElement
 import com.kei.pulse.model.OverlayPreset
@@ -77,7 +73,6 @@ import com.kei.pulse.ui.theme.HudBackground
 import com.kei.pulse.model.AppSettings
 import com.kei.pulse.model.PerformanceProfile
 import com.kei.pulse.model.TileInteractionBehavior
-import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 private val accentColorOptions = listOf(
@@ -94,6 +89,7 @@ fun SettingsScreen(
     settings: AppSettings,
     onBack: () -> Unit,
     onPulseEnabledChange: (Boolean) -> Unit = {},
+    onAutomationEnabledChange: (Boolean) -> Unit,
     onRgbModeChange: (RgbMode) -> Unit = {},
     onRgbManualTargetChange: (RgbStick) -> Unit = {},
     onRgbManualStickChange: (RgbStick, Int, Float) -> Unit = { _, _, _ -> },
@@ -131,10 +127,6 @@ fun SettingsScreen(
     onClearQuickAccessCombo: () -> Unit = {},
     capturingCombo: Boolean = false,
 ) {
-    val context = LocalContext.current.applicationContext
-    val automationStorage = remember(context) { SettingsStorage(context) }
-    val automationEnabled by automationStorage.automationEnabled.collectAsState(initial = false)
-    val automationScope = rememberCoroutineScope()
     var showResetConfirmation by remember { mutableStateOf(false) }
 
     HudBackground(modifier = Modifier.fillMaxSize()) {
@@ -252,10 +244,8 @@ fun SettingsScreen(
                     )
                 }
                 Switch(
-                    checked = automationEnabled,
-                    onCheckedChange = { enabled ->
-                        automationScope.launch { automationStorage.persistAutomationEnabled(enabled) }
-                    },
+                    checked = settings.automationEnabled,
+                    onCheckedChange = onAutomationEnabledChange,
                 )
             }
         }

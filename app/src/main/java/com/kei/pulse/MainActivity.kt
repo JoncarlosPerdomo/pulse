@@ -166,6 +166,7 @@ class MainActivity : ComponentActivity() {
                             settings = settings,
                             onBack = { screen = Screen.TUNER },
                             onPulseEnabledChange = ::onPulseMasterToggle,
+                            onAutomationEnabledChange = viewModel::setAutomationEnabled,
                             onRgbModeChange = ::onRgbModeSelected,
                             onRgbManualTargetChange = viewModel::setRgbManualTarget,
                             onRgbManualStickChange = ::onRgbManualStickChanged,

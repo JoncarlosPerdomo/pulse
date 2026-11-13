@@ -145,18 +145,23 @@ adb shell am broadcast -n com.kei.pulse/.automation.AutomationReceiver -a com.ke
 adb shell am broadcast -n com.kei.pulse/.automation.AutomationReceiver -a com.kei.pulse.action.QUERY
 ```
 
-`SET_TIER` takes a case-insensitive `tier`: `max` (also `aaa` or `AAA / Max`),
-`balanced`, `power_saving` (also `Power Saving`), or `custom`.
+`SET_TIER` takes a case-insensitive `tier`: `max`, `balanced`, `power_saving`, or `custom`.
 Custom restores the saved Custom snapshot and reports failure if none exists.
 `APPLY_PROFILE` takes an exact, case-sensitive saved or bundled profile `name`;
-missing and duplicate names return a failure. Profile application keeps the current tier
-and reasserts the global GPU lock or floor, like a per-app binding's cap write.
+missing and duplicate names return a failure. Stock is not a saved profile; use tier `max`
+for it. Profile application keeps the current tier and reasserts the global GPU lock or
+floor, like a per-app binding's cap write.
 
 The ordered broadcast result data and the `result` string extra contain the response.
 `am broadcast` prints this as `data="..."`. Write and error responses start with `applied:`, `blocked:`,
 `deferred:`, `failed:`, `invalid:`, or `disabled:`. A bound game's clock ownership blocks
 tier and profile changes. Following-global AutoTDP releases the clocks before applying.
 A rejected command never reports success. Writes appear under the `PulseAutomation` logcat tag.
+
+The result code is `-1` (`Activity.RESULT_OK`) for `applied:` and query results, and `1` for
+`disabled:`, `blocked:`, `deferred:`, `failed:`, and `invalid:`. `am broadcast` prints it as `result=`.
+The receiver answers within about 8 seconds. If a write is still running by then, the result is
+`deferred: still applying` with code `1`, and the write finishes anyway; send `QUERY` to read the outcome.
 
 A query reads live sysfs nodes, rather than saved profile values. Example result data:
 

@@ -98,8 +98,6 @@ class SettingsStorage(private val context: Context) {
     private val customPrimeBoostKey = booleanPreferencesKey("custom_prime_core_boost")
     private val customGovernorLabelKey = stringPreferencesKey("custom_governor_label")
 
-    val automationEnabled: Flow<Boolean> = context.settingsDataStore.data.map { it[automationEnabledKey] ?: false }
-
     suspend fun persistAutomationEnabled(enabled: Boolean) {
         context.settingsDataStore.edit { it[automationEnabledKey] = enabled }
     }
@@ -115,6 +113,7 @@ class SettingsStorage(private val context: Context) {
                 ?.let(::parseBehavior)
                 ?: TileInteractionBehavior.SHOW_DIALOG,
             pulseEnabled = preferences[pulseEnabledKey] ?: true,
+            automationEnabled = preferences[automationEnabledKey] ?: false,
             applyLastProfileOnBoot = preferences[applyLastProfileOnBootKey] ?: false,
             sleepProfileEnabled = preferences[sleepProfileEnabledKey] ?: false,
             sleepProfileId = preferences[sleepProfileIdKey],
