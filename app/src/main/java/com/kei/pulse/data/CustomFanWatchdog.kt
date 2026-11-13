@@ -27,7 +27,7 @@ class CustomFanWatchdog(
 
     internal enum class LaunchOutcome { Succeeded, Failed }
 
-    private var state: State = State.Idle
+    @Volatile private var state: State = State.Idle
 
     /**
      * Starts the watcher when it is not known to be running and records a heartbeat. [Status.Armed] means the
@@ -54,7 +54,6 @@ class CustomFanWatchdog(
         return if (outcome == LaunchOutcome.Succeeded) Status.Armed else Status.BackoffStarted
     }
 
-    @Synchronized
     fun stop() {
         if (state is State.Armed) state = State.Idle
     }
@@ -71,6 +70,7 @@ class CustomFanWatchdog(
         private const val CHECK_INTERVAL_SECONDS = 1L
         private const val LOCK_POLL_SECONDS = "0.1"
         private const val LOCK_POLLS = 30
+        private const val LAUNCH_POLLS = LOCK_POLLS + 10
 
         internal const val STALE_AFTER_MS = 5 * MS_PER_SECOND
         internal const val STARTED = "STARTED"
@@ -103,7 +103,7 @@ class CustomFanWatchdog(
                     rm -f "${'$'}ack"
                     setsid sh "${'$'}0" watch </dev/null >/dev/null 2>&1 &
                     polls=0
-                    until [ -e "${'$'}ack" ] || [ "${'$'}polls" -ge $LOCK_POLLS ]; do
+                    until [ -e "${'$'}ack" ] || [ "${'$'}polls" -ge $LAUNCH_POLLS ]; do
                         sleep $LOCK_POLL_SECONDS
                         polls=${'$'}((polls + 1))
                     done

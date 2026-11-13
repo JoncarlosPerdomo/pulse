@@ -593,7 +593,7 @@ class ForegroundAppMonitorService : Service() {
         }
         // Safety net: if Custom was driving (vendor left in manual passthrough), hand the fan back to the Smart
         // auto-curve off-main so a teardown can't strand it in manual mode with no vendor thermal regulation.
-        if (customFanRunning) stopCustomFan(Restore.Detached)
+        if (customFanRunning) stopCustomFan(Restore.Shutdown)
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -1009,7 +1009,7 @@ class ForegroundAppMonitorService : Service() {
         }
     }
 
-    private enum class Restore { None, InScope, Detached }
+    private enum class Restore { None, InScope, Shutdown }
 
     private fun stopCustomFan(restore: Restore = Restore.None) {
         fanWatchdog.stop()
@@ -1030,7 +1030,7 @@ class ForegroundAppMonitorService : Service() {
         when (restore) {
             Restore.None -> Unit
             Restore.InScope -> serviceScope.launch(Dispatchers.IO) { handBack() }
-            Restore.Detached -> Thread { runCatching { handBack() } }.apply {
+            Restore.Shutdown -> Thread { runCatching { handBack() } }.apply {
                 start()
                 join(DESTROY_HAND_BACK_TIMEOUT_MS)
             }

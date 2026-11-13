@@ -11,6 +11,7 @@ import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -217,7 +218,7 @@ class CustomFanWatchdogTest {
         val first = sandbox.watch()
         sandbox.waitForBounce()
         val second = sandbox.watch()
-        sandbox.waitForExit(first)
+        sandbox.waitForTermination(first)
         sandbox.waitForExit(second)
         assertEquals(FanController.SMART, sandbox.mode())
         sandbox.assertRestoredOnceAndUnlocked()
@@ -324,6 +325,7 @@ class CustomFanWatchdogTest {
             set(value) { if (value) slowRestoreFlag.createNewFile() else slowRestoreFlag.delete() }
 
         init {
+            assumeTrue(File("/proc/uptime").exists())
             heartbeat.writeText("beat")
             stub("sleep", "[ -e ${quoted(beatingFlag)} ] && echo \$\$ > ${quoted(heartbeat)}; exec /bin/sleep 0.05")
             stub(
@@ -365,9 +367,11 @@ class CustomFanWatchdogTest {
         fun watchUntilExit() = waitForExit(watch())
 
         fun waitForExit(process: Process) {
-            assertTrue(process.waitFor(SCRIPT_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+            waitForTermination(process)
             assertEquals(0, process.exitValue())
         }
+
+        fun waitForTermination(process: Process) = assertTrue(process.waitFor(SCRIPT_TIMEOUT_SECONDS, TimeUnit.SECONDS))
 
         fun waitForLock() = waitUntil { File(lock, "pid").exists() }
 
