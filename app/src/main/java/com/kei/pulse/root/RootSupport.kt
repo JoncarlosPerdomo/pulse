@@ -7,6 +7,8 @@ import kotlin.concurrent.withLock
 
 object RootSupport {
 
+    const val PSERVER_COMMAND_LIMIT = 255
+
     // Process-wide serialization of PServer access. The binder cannot service overlapping
     // transacts reliably, and several callers (per-app watcher apply, telemetry poll, tile,
     // sleep monitor) hit it concurrently. Every PServer path — cat() reads, batched sysfs reads
@@ -20,7 +22,7 @@ object RootSupport {
         runRootCommand(command, PrivilegedShell { RootExec().executeAsRoot(it).getOrNull() })
 
     internal fun runRootCommand(command: String, shell: PrivilegedShell): String? = pServerLock.withLock {
-        if (command.length <= 255) return shell.run(command)
+        if (command.length <= PSERVER_COMMAND_LIMIT) return shell.run(command)
 
         // PServer truncates inline commands at 255 characters on the Thor:
         // https://github.com/JoncarlosPerdomo/pulse/issues/4
@@ -28,7 +30,7 @@ object RootSupport {
         try {
             writeScript(script, command)
             val invocation = "sh ${SysfsBatch.shellQuote(script.absolutePath)}"
-            require(invocation.length <= 255) { "PServer script path exceeds its command limit" }
+            require(invocation.length <= PSERVER_COMMAND_LIMIT) { "PServer script path exceeds its command limit" }
             shell.run(invocation)
         } finally {
             script.delete()

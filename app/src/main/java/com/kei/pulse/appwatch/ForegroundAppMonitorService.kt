@@ -96,7 +96,6 @@ class ForegroundAppMonitorService : Service() {
     private val fanWatchdog by lazy {
         CustomFanWatchdog(java.io.File(filesDir, "fan-heartbeat")) { script ->
             com.kei.pulse.root.RootSupport.runGeneratedScript(this, "fan-watchdog.sh", script)
-                ?.trim() == "STARTED"
         }
     }
     private val fanCurveController = FanCurveController()
@@ -592,9 +591,7 @@ class ForegroundAppMonitorService : Service() {
         // Safety net: if Custom was driving (vendor left in manual passthrough), hand the fan back to the Smart
         // auto-curve off-main so a teardown can't strand it in manual mode with no vendor thermal regulation.
         if (customFanRunning) {
-            customFanRunning = false
-            fanLoopJob?.cancel()
-            fanWatchdog.stop()
+            stopCustomFan()
             Thread { runCatching { fanController.setMode(FanController.SMART) } }.start()
         }
         serviceScope.cancel()
@@ -874,9 +871,13 @@ class ForegroundAppMonitorService : Service() {
             }
         }
 
+        if (!fanWatchdog.startOrBeatBeforeDriving()) {
+            fanLog("CUSTOM watchdog unavailable; fan driving paused with retry backoff")
+            return false
+        }
+
         // Active cooling: drive the Custom fan. Writing fan_mode=6 RESETS the Odin's duty to a ~50% mode-init
         // default, so pin our current intended duty in the SAME command (read-first → only on drift).
-        if (!fanWatchdog.refresh()) return false
         val intendedDuty = FanCurve.percentToDuty(fanCurveController.appliedPercent, fanCurveController.period)
         fanController.ensureManualMode(intendedDuty)
         if (settings.fanSmartEnabled) {
@@ -894,7 +895,13 @@ class ForegroundAppMonitorService : Service() {
 
     private suspend fun reassertManagedFan(settings: AppSettings) {
         // Autocalibrate is sweeping the duty node directly — stand down so we don't fight its writes.
-        if (FanCurveController.externalControlActive) return
+        if (FanCurveController.externalControlActive) {
+            if (customFanRunning && !fanWatchdog.startOrBeatBeforeDriving()) {
+                fanLog("CUSTOM watchdog unavailable during calibration; handing the fan back to Smart")
+                stopCustomFan(restoreVendor = true)
+            }
+            return
+        }
         val autoActive = autoTdpPackage != null
         val boundFan = boundConfig?.fanMode
         // ONLY the GLOBAL Fan card arms the release edge. A bound per-app fan must NOT (P5): its hand-back is
@@ -919,10 +926,10 @@ class ForegroundAppMonitorService : Service() {
         when (action) {
             is FanAction.RunCustomLoop -> {
                 // Custom fan (all 3 devices expose gpio5_pwm2): manual passthrough + PULSE drives the duty.
-                // If the node vanished at runtime, never sit on a phantom Custom mode — fall back to Smart.
+                // If the node vanished or the watchdog can't arm, never sit on a phantom Custom mode — fall back to Smart.
                 if (!runCustomFan(settings)) {
                     stopCustomFan()
-                    fanController.setMode(FanController.SMART)
+                    if (fanController.readMode() != FanController.SMART) fanController.setMode(FanController.SMART)
                 }
             }
             is FanAction.SetVendorMode -> {
@@ -1925,7 +1932,7 @@ class ForegroundAppMonitorService : Service() {
         private const val NOTIFICATION_ID = 32
         // Diagnostic AutoTDP logging (adb logcat -s PulseAutoTdp) — on while verifying on-device.
         private const val AUTO_DEBUG = true
-        private const val POLL_INTERVAL_MS = 1_000L
+        private const val POLL_INTERVAL_MS = CustomFanWatchdog.POLL_INTERVAL_MS
         private const val FAN_SLEW_MS = 300L // smooth-ramp cadence: small steps → smooth & quiet
         private const val FAN_RECHECK_MS = 120L // duty re-check cadence: catch the vendor's game-transition
         // 50% reset fast enough that the re-pin is inaudible (decoupled from the slower ramp above)
