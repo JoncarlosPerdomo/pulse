@@ -16,9 +16,22 @@ object RootSupport {
     // there is no re-entrancy.
     private val pServerLock = ReentrantLock()
 
-    fun runRootCommand(command: String): String? {
-        return pServerLock.withLock {
-            RootExec().executeAsRoot(command).getOrNull()
+    fun runRootCommand(command: String): String? =
+        runRootCommand(command, PrivilegedShell { RootExec().executeAsRoot(it).getOrNull() })
+
+    internal fun runRootCommand(command: String, shell: PrivilegedShell): String? = pServerLock.withLock {
+        if (command.length <= 255) return shell.run(command)
+
+        // PServer truncates inline commands at 255 characters on the Thor:
+        // https://github.com/JoncarlosPerdomo/pulse/issues/4
+        val script = File.createTempFile("pulse-", ".sh")
+        try {
+            writeScript(script, command)
+            val invocation = "sh ${SysfsBatch.shellQuote(script.absolutePath)}"
+            require(invocation.length <= 255) { "PServer script path exceeds its command limit" }
+            shell.run(invocation)
+        } finally {
+            script.delete()
         }
     }
 
@@ -30,10 +43,6 @@ object RootSupport {
 
     fun runScript(scriptFile: File): String? = runRootCommand("sh ${scriptFile.absolutePath}")
 
-    // The generated script lives in app-private storage but MUST be world-readable/-executable: the stock
-    // PServer service runs it as root from a DIFFERENT uid, so it has to read+exec our file. This is the core
-    // of the no-root mechanism, not an oversight — hence the deliberate suppression.
-    @android.annotation.SuppressLint("SetWorldReadable")
     fun writeScript(
         context: Context,
         scriptName: String,
@@ -44,7 +53,13 @@ object RootSupport {
             scriptDir.mkdirs()
         }
 
-        val scriptFile = File(scriptDir, scriptName)
+        return writeScript(File(scriptDir, scriptName), scriptContents)
+    }
+
+    // PServer runs as a different uid and must read the app's generated scripts:
+    // https://github.com/JoncarlosPerdomo/pulse/pull/2
+    @android.annotation.SuppressLint("SetWorldReadable")
+    private fun writeScript(scriptFile: File, scriptContents: String): File {
         scriptFile.writeText(scriptContents)
         scriptFile.setReadable(true, false)
         scriptFile.setExecutable(true, false)
