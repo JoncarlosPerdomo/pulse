@@ -56,16 +56,8 @@ class PerformanceCommandBuilder {
         // lets the vendor performance daemon stomp min_pwrlevel back up and floor the GPU
         // mid-range (~900MHz). Locking min=slowest / max=ceiling keeps it free to idle down
         // and scale up to its cap.
-        write(lines, minPath, slowestLevel.toLong(), "444")
-        write(lines, policy.scalingMaxPath, maxLevel.toLong(), "444")
-    }
-
-    private fun write(lines: MutableList<String>, path: String, value: Long, mode: String) {
-        lines += "if [ \"\$(cat $path)\" != $value ] || [ \"\$(stat -c %a $path)\" != $mode ]; then"
-        lines += "chmod 666 $path"
-        lines += "echo $value > $path"
-        lines += "chmod $mode $path"
-        lines += "fi"
+        lines += GpuClockCommands.write(minPath, slowestLevel)
+        lines += GpuClockCommands.write(policy.scalingMaxPath, maxLevel)
     }
 
     /** ascending kHz table -> power level (fastest = 0). */

@@ -2,6 +2,7 @@ package com.kei.pulse.data
 
 import com.kei.pulse.model.CpuPolicyInfo
 import com.kei.pulse.root.CpuClockProtection
+import com.kei.pulse.root.GpuClockCommands
 import com.kei.pulse.root.PServerShell
 import com.kei.pulse.root.PrivilegedShell
 import com.kei.pulse.root.RootSupport
@@ -125,7 +126,7 @@ class GpuFloorController(private val shell: PrivilegedShell = PServerShell) {
 
     fun setFloorLevel(kgslRoot: String, floorLevel: Int): Boolean {
         val path = "$kgslRoot/min_pwrlevel"
-        shell.run(writeLevel(path, floorLevel))
+        shell.run(GpuClockCommands.write(path, floorLevel))
         return true
     }
 
@@ -137,13 +138,10 @@ class GpuFloorController(private val shell: PrivilegedShell = PServerShell) {
         val maxP = "$kgslRoot/max_pwrlevel"
         val minP = "$kgslRoot/min_pwrlevel"
         val level = readCeilingLevel(kgslRoot) ?: return null
-        shell.run("${writeLevel(maxP, level)}; ${writeLevel(minP, level)}")
+        shell.run("${GpuClockCommands.write(maxP, level)}; ${GpuClockCommands.write(minP, level)}")
         return shell.run("cat $minP")?.trim()?.toIntOrNull()
     }
 
-    private fun writeLevel(path: String, level: Int): String =
-        "if [ \"\$(cat $path)\" != $level ] || [ \"\$(stat -c %a $path)\" != 444 ]; then " +
-            "chmod 666 $path; echo $level > $path; chmod 444 $path; fi"
 }
 
 /** Snapshot of live device telemetry for the HUD. Nulls render as "—". */

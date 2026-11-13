@@ -248,10 +248,7 @@ class GlobalTuning(
         val global = store.state().sideControls
         val side = if (gpuFloorPercent == null) global else global.copy(gpuLocked = false, gpuFloorPercent = gpuFloorPercent)
         val result = writeCaps()
-        reapplyGpuControl(policies, side)
-        if (side.cpuFloorPercent > 0) {
-            check(cpuFloor.setFloor(policies, side.cpuFloorPercent)) { "CPU floor write failed" }
-        }
+        reapplyFloorsAndGpuLock(policies, side)
         result
     }
 
@@ -329,13 +326,17 @@ class GlobalTuning(
         gpuFloor.readCeilingLevel(gpu.policyPath)?.let { gpuFloorLevelFor(gpu, percent, it) }
 
     private fun reapplyControlsReleasedByCaps(policies: List<CpuPolicyInfo>, side: SideControlState) {
-        reapplyGpuControl(policies, side)
-        if (side.cpuFloorPercent > 0) {
-            check(cpuFloor.setFloor(policies, side.cpuFloorPercent)) { "CPU floor write failed" }
-        }
+        reapplyFloorsAndGpuLock(policies, side)
         val prime = primeOf(policies)
         if (side.primeCoreBoostLimited && !side.powerTargetEnabled && prime != null) {
             AutoTuneController.applyFreqsToDevice(policies, mapOf(prime.id to noTurboFreq(prime)), shell)
+        }
+    }
+
+    private fun reapplyFloorsAndGpuLock(policies: List<CpuPolicyInfo>, side: SideControlState) {
+        reapplyGpuControl(policies, side)
+        if (side.cpuFloorPercent > 0) {
+            check(cpuFloor.setFloor(policies, side.cpuFloorPercent)) { "CPU floor write failed" }
         }
     }
 
