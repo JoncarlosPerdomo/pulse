@@ -56,11 +56,10 @@ class GovernorController(private val shell: PrivilegedShell = PServerShell) {
     fun setGovernorRaw(policies: List<CpuPolicyInfo>, governor: String): Boolean {
         val cpu = policies.filterNot { it.isGpu }
         if (cpu.isEmpty() || governor.isBlank()) return false
-        val cmd = cpu.joinToString("; ") { p ->
+        cpu.forEach { p ->
             val path = "${p.policyPath}/scaling_governor"
-            "chmod 666 $path; echo $governor > $path; chmod 644 $path"
+            shell.run("chmod 666 $path; echo $governor > $path; chmod 644 $path")
         }
-        shell.run(cmd)
         return true
     }
 
@@ -71,11 +70,10 @@ class GovernorController(private val shell: PrivilegedShell = PServerShell) {
         val avail = availableGovernors(cpu.first())
         val chosen = option.candidates.firstOrNull { c -> avail.any { it.equals(c, true) } }
             ?: option.candidates.first()
-        val cmd = cpu.joinToString("; ") { p ->
+        cpu.forEach { p ->
             val path = "${p.policyPath}/scaling_governor"
-            "chmod 666 $path; echo $chosen > $path; chmod 644 $path"
+            shell.run("chmod 666 $path; echo $chosen > $path; chmod 644 $path")
         }
-        shell.run(cmd)
         return chosen
     }
 
@@ -467,26 +465,23 @@ class CpuFloorController(private val shell: PrivilegedShell = PServerShell) {
     fun setFloor(policies: List<CpuPolicyInfo>, percent: Int): Boolean {
         val cpu = policies.filterNot { it.isGpu }
         if (cpu.isEmpty()) return false
-        // Clearing the floor resets every cluster (incl. prime) to its lowest OPP — unchanged behaviour.
         if (percent <= 0) {
-            val cmd = cpu.joinToString("; ") { p ->
+            cpu.forEach { p ->
                 val path = "${p.policyPath}/scaling_min_freq"
-                "chmod 666 $path; echo ${p.minFreq} > $path; chmod 644 $path"
+                val lowest = p.supportedFrequencies.minOrNull() ?: p.minFreq
+                shell.run("chmod 666 $path; echo $lowest > $path; chmod 644 $path")
             }
-            shell.run(cmd)
             return true
         }
         // Raise: skip the PRIME (its min is the cap apply's 444-locked node) and clamp the rest to <= cap.
-        val cmd = floorableClusters(cpu).joinToString("; ") { p ->
+        floorableClusters(cpu).forEach { p ->
             // Never raise this cluster's min above its current cap (scaling_max) — that would make the
             // kernel clamp the cap back up. Live-read the cap; fall back to the requested floor if absent.
             val cap = cat("${p.policyPath}/scaling_max_freq", shell)?.toIntOrNull()
             val target = floorTargetFor(p, percent, cap)
             val path = "${p.policyPath}/scaling_min_freq"
-            "chmod 666 $path; echo $target > $path; chmod 644 $path"
+            shell.run("chmod 666 $path; echo $target > $path; chmod 644 $path")
         }
-        if (cmd.isBlank()) return true // only a prime cluster exists (nothing safe to floor) — no-op success
-        shell.run(cmd)
         return true
     }
 
