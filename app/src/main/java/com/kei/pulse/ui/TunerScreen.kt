@@ -69,8 +69,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import com.kei.pulse.data.GlobalTuning
-import com.kei.pulse.model.PowerTargetMath
+import com.kei.pulse.data.GlobalTuning.Companion.gpuFloorMhz
 import com.kei.pulse.data.DisplayController
 import com.kei.pulse.data.GovernorOption
 import com.kei.pulse.data.TelemetrySnapshot
@@ -90,6 +89,7 @@ private const val NEW_PROFILE_DIALOG_ID = "__new_profile__"
 @Composable
 fun MainTunerScreen(
     state: TunerState,
+    tuningReadback: TuningReadback,
     sleepProfileId: String?,
     onApplyProfile: (PerformanceProfile) -> Unit,
     onApplyCurrent: (TunerState) -> Unit,
@@ -142,22 +142,11 @@ fun MainTunerScreen(
     autoTdpBias: AutoTdpBias,
     onAutoTdpBiasChange: (AutoTdpBias) -> Unit,
 ) {
-    var gpuMinLevel by remember { mutableStateOf<Int?>(null) }
     val gpu = state.policies.firstOrNull { it.isGpu }
-    val expectedCaps = when {
-        activeTier != PowerTier.CUSTOM -> GlobalTuning.tierFrequencies(activeTier, state.policies)
-        powerTargetEnabled -> PowerTargetMath.capsForPercent(state.policies, powerTargetPercent, powerTargetCpuOnly)
-        else -> state.currentValues
-    }.toMutableMap().apply {
-        if (primeCoreBoostLimited && !powerTargetEnabled) {
-            state.policies.filterNot { it.isGpu }.maxByOrNull { it.selectableMaxFreq }?.let { prime ->
-                prime.supportedFrequencies.getOrNull(prime.supportedFrequencies.size - 2)?.let {
-                    put(prime.id, it)
-                }
-            }
-        }
-    }
-    val tierStatus = capsInForce(state.policies, expectedCaps, state.actualValues)
+    val tierStatus = globalTuningStatus(
+        capsInForce(state.policies, tuningReadback.expectedCaps, state.actualValues),
+        tuningReadback.owner,
+    )
     var dialogProfileId by remember { mutableStateOf<String?>(null) }
 
     ScreenNotifications(
@@ -200,9 +189,7 @@ fun MainTunerScreen(
                 )
             } else {
                 TelemetryHud(
-                    readTelemetry = {
-                        readTelemetry().also { gpuMinLevel = it.gpuMinLevel }
-                    },
+                    readTelemetry = readTelemetry,
                     estimatedPeakW = estimatedPeakW,
                 )
 
@@ -242,7 +229,7 @@ fun MainTunerScreen(
                     active = activeTier,
                     onSelect = onSelectTier,
                     enabled = !autoTdpEnabled,
-                    appliedStatus = tierStatus.statusLabel(),
+                    appliedStatus = tierStatus,
                 )
 
                 if (activeTier == PowerTier.CUSTOM && !autoTdpEnabled) {
@@ -256,7 +243,7 @@ fun MainTunerScreen(
                     )
                 }
 
-                CurrentFrequenciesCard(state = state, gpuFloorMhz = gpuFloorMhz(gpu, gpuMinLevel))
+                CurrentFrequenciesCard(state = state, gpuFloorMhz = gpuFloorMhz(gpu, tuningReadback.gpuMinLevel))
 
                 // AutoTDP manages the governor + clocks itself, but the fan stays user-configurable: a
                 // Custom fan set here keeps running (cascaded) during AutoTDP, otherwise Smart is used.
@@ -314,7 +301,9 @@ fun MainTunerScreen(
                     GpuFloorModule(
                         currentPercent = gpuFloorPercent,
                         gpu = gpu,
-                        actualLevel = gpuMinLevel,
+                        actualLevel = tuningReadback.gpuMinLevel,
+                        ceiling = tuningReadback.gpuMaxLevel,
+                        owner = tuningReadback.owner,
                         locked = gpuLocked,
                         onSelect = onSelectGpuFloor,
                         onToggleLock = onToggleGpuLock,

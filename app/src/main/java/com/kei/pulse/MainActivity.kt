@@ -226,6 +226,7 @@ class MainActivity : ComponentActivity() {
                     }
                     Screen.TUNER -> {
                         MainTunerScreen(
+                            tuningReadback = viewModel.tuningReadback.collectAsStateWithLifecycle().value,
                             state = state,
                             sleepProfileId = settings.sleepProfileId.takeIf { settings.sleepProfileEnabled },
                             onApplyProfile = viewModel::applyProfile,

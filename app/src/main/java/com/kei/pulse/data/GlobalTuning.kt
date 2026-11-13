@@ -81,6 +81,11 @@ class GlobalTuning(
     private val cpuFloor = CpuFloorController(shell)
     private val gpuFloor = GpuFloorController(shell)
 
+    internal suspend fun expectedCaps(policies: List<CpuPolicyInfo>): Map<Int, Int> =
+        expectedCapsFor(store.state(), policies, store.customValues())
+
+    internal suspend fun clockOwner(): ClockOwner = ownership().withOwnership { owner }
+
     suspend fun switchTo(tier: PowerTier): TuningOutcome = withContext(Dispatchers.IO) {
         mutex.withLock {
             if (!caps.isAvailable) return@withLock TuningOutcome.Failed(FailureReason.PSERVER_UNAVAILABLE)
@@ -274,7 +279,7 @@ class GlobalTuning(
             gpuFloor.lockToCurrentCap(gpu.policyPath)
         } else {
             val ceiling = shell.run("cat ${gpu.policyPath}/max_pwrlevel")?.trim()?.toIntOrNull() ?: return
-            val floor = gpuFloorLevelFor(gpu, side.gpuFloorPercent).coerceAtLeast(ceiling)
+            val floor = gpuFloorLevelFor(gpu, side.gpuFloorPercent, ceiling)
             gpuFloor.setFloorLevel(gpu.policyPath, floor)
         }
     }
@@ -332,17 +337,43 @@ class GlobalTuning(
             }
         }
 
-        private fun primeOf(policies: List<CpuPolicyInfo>): CpuPolicyInfo? =
+        internal fun expectedCapsFor(
+            state: TuningState,
+            policies: List<CpuPolicyInfo>,
+            customValues: Map<Int, Int>,
+        ): Map<Int, Int> {
+            val side = state.sideControls
+            val caps = when {
+                state.tier != PowerTier.CUSTOM -> tierFrequencies(state.tier, policies)
+                side.powerTargetEnabled -> PowerTargetMath.capsForPercent(policies, side.powerTargetPercent, side.powerTargetCpuOnly)
+                else -> customValues.filterKeys { id -> policies.any { it.id == id } }
+            }
+            val prime = primeOf(policies)
+            return if (side.primeCoreBoostLimited && !side.powerTargetEnabled && prime != null) {
+                caps + (prime.id to noTurboFreq(prime))
+            } else caps
+        }
+
+        internal fun primeOf(policies: List<CpuPolicyInfo>): CpuPolicyInfo? =
             policies.filterNot { it.isGpu }.maxByOrNull { it.selectableMaxFreq }
 
-        private fun noTurboFreq(policy: CpuPolicyInfo): Int {
+        internal fun noTurboFreq(policy: CpuPolicyInfo): Int {
             val freqs = policy.supportedFrequencies
             return freqs.getOrNull(freqs.size - 2) ?: freqs.last()
         }
 
         private fun slowestGpuLevel(gpu: CpuPolicyInfo): Int = (gpu.supportedFrequencies.size - 1).coerceAtLeast(0)
 
-        internal fun gpuFloorLevelFor(gpu: CpuPolicyInfo, percent: Int): Int {
+        internal fun gpuFloorMhz(gpu: CpuPolicyInfo?, level: Int?): Int? {
+            val frequencies = gpu?.supportedFrequencies ?: return null
+            if (level == null || level !in frequencies.indices) return null
+            return frequencies[frequencies.lastIndex - level] / 1000
+        }
+
+        internal fun gpuFloorLevelFor(gpu: CpuPolicyInfo, percent: Int, ceiling: Int = 0): Int =
+            requestedGpuFloorLevel(gpu, percent).coerceAtLeast(ceiling)
+
+        private fun requestedGpuFloorLevel(gpu: CpuPolicyInfo, percent: Int): Int {
             val asc = gpu.supportedFrequencies
             if (percent <= 0 || asc.isEmpty()) return slowestGpuLevel(gpu)
             val targetFreq = gpu.selectableMaxFreq * percent / 100

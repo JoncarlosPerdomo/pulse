@@ -1,6 +1,8 @@
 package com.kei.pulse.ui
 
 import com.kei.pulse.data.GlobalTuning.Companion.gpuFloorLevelFor
+import com.kei.pulse.data.GlobalTuning.Companion.gpuFloorMhz
+import com.kei.pulse.model.ClockOwner
 import com.kei.pulse.model.CpuPolicyInfo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -50,9 +52,9 @@ class TuningInForceTest {
 
     @Test
     fun `missing policies caps or readback cannot confirm application`() {
-        assertEquals(TuningInForce.Unknown, capsInForce(emptyList(), emptyMap(), emptyMap()))
-        assertEquals(TuningInForce.Unknown, capsInForce(listOf(cpu), emptyMap(), mapOf(0 to 1400000)))
-        assertEquals(TuningInForce.Unknown, capsInForce(listOf(cpu), mapOf(0 to 1400000), emptyMap()))
+        assertEquals(TuningInForce.Unverified, capsInForce(emptyList(), emptyMap(), emptyMap()))
+        assertEquals(TuningInForce.Unverified, capsInForce(listOf(cpu), emptyMap(), mapOf(0 to 1400000)))
+        assertEquals(TuningInForce.Unverified, capsInForce(listOf(cpu), mapOf(0 to 1400000), emptyMap()))
     }
 
     @Test
@@ -82,12 +84,30 @@ class TuningInForceTest {
     }
 
     @Test
-    fun `missing or invalid floor readback stays unknown`() {
-        assertEquals(TuningInForce.Unknown, gpuFloorInForce(null, 50, 0))
-        assertEquals(TuningInForce.Unknown, gpuFloorInForce(gpu.copy(supportedFrequencies = emptyList()), 50, 0))
+    fun `missing or invalid floor readback stays unverified`() {
+        assertEquals(TuningInForce.Unverified, gpuFloorInForce(null, 50, 0))
+        assertEquals(TuningInForce.Unverified, gpuFloorInForce(gpu.copy(supportedFrequencies = emptyList()), 50, 0))
         for (level in listOf(null, -1, gpu.supportedFrequencies.size)) {
             assertNull(gpuFloorMhz(gpu, level))
-            assertEquals(TuningInForce.Unknown, gpuFloorInForce(gpu, 50, level))
+            assertEquals(TuningInForce.Unverified, gpuFloorInForce(gpu, 50, level))
+        }
+    }
+
+    @Test
+    fun `clamped floor matches the writer ceiling`() {
+        assertEquals(TuningInForce.Applied, gpuFloorInForce(gpu, 75, 5, 5))
+        assertEquals(TuningInForce.NotApplied, gpuFloorInForce(gpu, 75, 6, 5))
+        assertEquals(TuningInForce.Unverified, gpuFloorInForce(gpu, 75, 5, null))
+    }
+
+    @Test
+    fun `other clock owners hide global status for both matches and mismatches`() {
+        for (status in TuningInForce.entries) {
+            assertEquals(status, globalTuningStatus(status, ClockOwner.Free))
+            for (owner in listOf(ClockOwner.GlobalAutoTdp, ClockOwner.BoundGame(false), ClockOwner.BoundGame(true))) {
+                assertNull(globalTuningStatus(status, owner))
+                assertEquals("75% - 740 MHz", gpuFloorChipLabel(gpu, 75, globalTuningStatus(status, owner)))
+            }
         }
     }
 }

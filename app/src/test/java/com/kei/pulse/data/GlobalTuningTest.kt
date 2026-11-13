@@ -35,6 +35,37 @@ class GlobalTuningTest {
         cpuFloorPercent = 60,
     )
 
+    @Test
+    fun `expected Custom caps use saved snapshot even when last applied caps change`() = runTest {
+        store.state = TuningState(PowerTier.CUSTOM, SideControlState.CLEARED)
+        store.custom = mapOf(little.id to 1_000_000, prime.id to 2_000_000, gpu.id to 500_000)
+        val expected = store.custom
+        tuning.switchTo(PowerTier.MAX)
+        store.state = TuningState(PowerTier.CUSTOM, SideControlState.CLEARED)
+        assertEquals(expected, tuning.expectedCaps(policies))
+        assertEquals(expected, GlobalTuning.expectedCapsFor(store.state, policies, expected))
+    }
+
+    @Test
+    fun `expected caps use tier and power target rules with prime boost only outside power target`() {
+        for (tier in listOf(PowerTier.MAX, PowerTier.BALANCED, PowerTier.POWER_SAVING)) {
+            assertEquals(GlobalTuning.tierFrequencies(tier, policies), GlobalTuning.expectedCapsFor(
+                TuningState(tier, SideControlState.CLEARED), policies, emptyMap(),
+            ))
+        }
+        val saved = policies.associate { it.id to it.selectableMaxFreq }
+        val limited = SideControlState.CLEARED.copy(primeCoreBoostLimited = true)
+        assertEquals(saved + (prime.id to 3_000_000), GlobalTuning.expectedCapsFor(
+            TuningState(PowerTier.CUSTOM, limited), policies, saved,
+        ))
+        for (cpuOnly in listOf(false, true)) {
+            val side = limited.copy(powerTargetEnabled = true, powerTargetPercent = 55, powerTargetCpuOnly = cpuOnly)
+            assertEquals(PowerTargetMath.capsForPercent(policies, 55, cpuOnly), GlobalTuning.expectedCapsFor(
+                TuningState(PowerTier.CUSTOM, side), policies, saved,
+            ))
+        }
+    }
+
     private fun givenCustomSetup() {
         store.state = TuningState(PowerTier.CUSTOM, customSide)
         store.snapshot = CustomTuning(
