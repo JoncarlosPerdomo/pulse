@@ -17,6 +17,8 @@ import androidx.core.content.getSystemService
 import com.kei.pulse.AppContainer
 import com.kei.pulse.MainActivity
 import com.kei.pulse.R
+import com.kei.pulse.model.ClockOwner
+import com.kei.pulse.model.ClockOwnership
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -101,7 +103,9 @@ class SleepProfileMonitorService : Service() {
                 val settings = container.settingsStorage.settings.first()
                 val profileId = settings.sleepProfileId
                 if (!settings.sleepProfileEnabled || profileId == null) return@withLock
-                container.repository.applySleepProfile(profileId)
+                (AppContainer.activeClockOwnership ?: ClockOwnership.FREE).withOwnership {
+                    container.repository.applySleepProfile(profileId)
+                }
             }
         }
     }
@@ -111,7 +115,16 @@ class SleepProfileMonitorService : Service() {
             transitionMutex.withLock {
                 val settings = container.settingsStorage.settings.first()
                 if (!settings.sleepProfileEnabled) return@withLock
-                container.repository.restorePreSleepState()
+                (AppContainer.activeClockOwnership ?: ClockOwnership.FREE).withOwnership {
+                    val autoTdp = owner == ClockOwner.GlobalAutoTdp || (owner as? ClockOwner.BoundGame)?.autoTdp == true
+                    if (autoTdp) {
+                        container.repository.restorePreSleepState()
+                    } else {
+                        container.globalTuning.writeCapsPreservingControlsUnderOwnership(container.repository.currentPolicies()) {
+                            container.repository.restorePreSleepState()
+                        }
+                    }
+                }
             }
         }
     }

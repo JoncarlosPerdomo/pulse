@@ -356,11 +356,6 @@ class PerformanceRepository(
         persistAsCustom: Boolean = false,
     ): Result<ApplyOutcome> {
         val filtered = selectedValues.filterKeys { policyId -> policies.any { it.id == policyId } }
-        // Hold a CPU cap against the vendor perflock: lower the PRIME cluster's scaling_min (and 444-lock it)
-        // BEFORE writing its max, or the daemon floors the prime's min and the kernel clamps a lower max back
-        // up — the prime cap silently won't bite (e.g. a 69% Power Target reads back at 4.2 GHz). PRIME ONLY:
-        // touching the perf cluster's min wakes the HAL and stomps perf's max. On a reset (Max/Stock) hand
-        // every CPU min back writable (644) to clear stale locks. Mirrors AutoTDP's apply/release path.
         val cpuPolicies = policies.filterNot { it.isGpu }
         val lowerMinPolicyIds = if (isReset) {
             cpuPolicies.map { it.id }.toSet()

@@ -1148,9 +1148,7 @@ class AutoTuneController(
         }
 
         /**
-         * Reopen every policy to its max and restore stock writability (`644`) so the firmware takes over.
-         * Rewriting *every* CPU `scaling_min` writable (`644`) clears any stale read-only min lock and hands
-         * min control back to the HAL.
+         * Reopen every policy to its max, lower CPU minimums to their lowest OPP, and release owned CPU permissions.
          */
         fun releaseCapsToDevice(policies: List<CpuPolicyInfo>) {
             if (policies.isEmpty()) return
@@ -1175,11 +1173,7 @@ class AutoTuneController(
             }
 
         private fun runScript(script: String, shell: PrivilegedShell = PServerShell) {
-            val cmd = script.lineSequence()
-                .map { it.trim() }
-                .filter { it.isNotEmpty() && !it.startsWith("#") }
-                .joinToString("; ")
-            if (cmd.isNotEmpty()) shell.run(cmd)
+            shell.run(script)
         }
 
         /** Offline (`online=false`) or online the given CPU cores via their `cpuN/online` node. */

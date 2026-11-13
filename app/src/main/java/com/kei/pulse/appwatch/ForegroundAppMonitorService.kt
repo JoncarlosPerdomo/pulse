@@ -1134,7 +1134,7 @@ class ForegroundAppMonitorService : Service() {
         if (!shouldReassertBoundCaps(config, autoTdpPackage)) return
         if (boundReassertTick++ % 2 != 0) return
         val policies = ensurePolicies()
-        container.globalTuning.writeCapsReassertingGpuUnderOwnership(policies, config.gpuFloorPercent) {
+        container.globalTuning.writeCapsPreservingControlsUnderOwnership(policies, config.gpuFloorPercent) {
             AutoTuneController.applyFreqsToDevice(policies, freqs)
         }
     }
@@ -1786,7 +1786,7 @@ class ForegroundAppMonitorService : Service() {
     private suspend fun applyConfig(config: PerAppConfig) {
         val parts = mutableListOf<String>()
         val tier = PerAppConfig.tierFromBinding(config.profileBinding)
-        container.globalTuning.writeCapsReassertingGpuUnderOwnership(ensurePolicies(), config.gpuFloorPercent) {
+        container.globalTuning.writeCapsPreservingControlsUnderOwnership(ensurePolicies(), config.gpuFloorPercent) {
             when {
                 tier == PowerTier.CUSTOM -> {
                     // Custom = the user's saved Custom setup, same as the Custom tier in-app.
@@ -1862,7 +1862,7 @@ class ForegroundAppMonitorService : Service() {
 
     private suspend fun restoreSnapshot(notify: Boolean = true) {
         val restore = container.perAppConfigStorage.restoreState.first() ?: return
-        container.globalTuning.writeCapsReassertingGpuUnderOwnership(ensurePolicies()) {
+        container.globalTuning.writeCapsPreservingControlsUnderOwnership(ensurePolicies()) {
             if (restore.values.isNotEmpty()) {
                 container.repository.applyRawValues(restore.values, restore.appliedDisplayProfileId)
             }

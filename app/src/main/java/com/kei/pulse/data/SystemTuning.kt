@@ -1,6 +1,8 @@
 package com.kei.pulse.data
 
 import com.kei.pulse.model.CpuPolicyInfo
+import com.kei.pulse.root.CpuClockProtection
+import com.kei.pulse.root.GpuClockCommands
 import com.kei.pulse.root.PServerShell
 import com.kei.pulse.root.PrivilegedShell
 import com.kei.pulse.root.RootSupport
@@ -124,7 +126,7 @@ class GpuFloorController(private val shell: PrivilegedShell = PServerShell) {
 
     fun setFloorLevel(kgslRoot: String, floorLevel: Int): Boolean {
         val path = "$kgslRoot/min_pwrlevel"
-        shell.run("chmod 666 $path; echo $floorLevel > $path; chmod 444 $path")
+        shell.run(GpuClockCommands.write(path, floorLevel))
         return true
     }
 
@@ -136,13 +138,10 @@ class GpuFloorController(private val shell: PrivilegedShell = PServerShell) {
         val maxP = "$kgslRoot/max_pwrlevel"
         val minP = "$kgslRoot/min_pwrlevel"
         val level = readCeilingLevel(kgslRoot) ?: return null
-        shell.run(
-            "chmod 666 $maxP; chmod 666 $minP; " +
-                "echo $level > $maxP; echo $level > $minP; " +
-                "chmod 444 $maxP; chmod 444 $minP",
-        )
+        shell.run("${GpuClockCommands.write(maxP, level)}; ${GpuClockCommands.write(minP, level)}")
         return shell.run("cat $minP")?.trim()?.toIntOrNull()
     }
+
 }
 
 /** Snapshot of live device telemetry for the HUD. Nulls render as "—". */
@@ -445,47 +444,21 @@ object PowerEstimator {
     ): Float? = relativeIndex(policies, caps)?.let { nominalPeakW * it }
 }
 
-/** CPU minimum-frequency floor via per-policy `scaling_min_freq`. Reversible (0 = lowest OPP). */
+/** CPU floor for non-prime clusters, bounded by each cluster's live CPU cap. */
 class CpuFloorController(private val shell: PrivilegedShell = PServerShell) {
-    /**
-     * Raise each non-prime cluster's `scaling_min` to a percentage of its max, or (on `percent <= 0`)
-     * reset every cluster's min to its lowest OPP.
-     *
-     * Lock discipline — this is deliberately PRIME-EXCLUSIVE on a raise (approach A):
-     *  - The PRIME cluster's `scaling_min` is owned exclusively by the cap apply path (it lowers the prime
-     *    min and `chmod 444`-locks it so the vendor perflock daemon can't re-raise it and clamp the prime
-     *    `scaling_max` cap back up). Writing the prime min here at writable-644 would RELEASE that 444 lock,
-     *    and if the floor% exceeded the cap% it would raise the prime min above the prime cap → the kernel
-     *    clamps the prime `scaling_max` back UP and the cap silently breaks. The prime can't be meaningfully
-     *    frequency-floored on this SoC anyway (the HAL pins its min ~3 GHz mid-game), so we skip it entirely.
-     *  - Every other cluster's floor target is clamped to `min(floorTarget, currentScalingMax)` — read live —
-     *    so a floor can never raise that cluster's min above its own cap (which the kernel would otherwise
-     *    reject / clamp the cap up to satisfy). We only touch each cluster's min (writable 644), never its
-     *    max, so the perf cap keeps biting.
-     *  - On reset (`percent <= 0`) every CPU cluster's min (prime included) goes back to its lowest OPP, as
-     *    before — clearing a floor must hand min control fully back.
-     */
     fun setFloor(policies: List<CpuPolicyInfo>, percent: Int): Boolean {
         val cpu = policies.filterNot { it.isGpu }
         if (cpu.isEmpty()) return false
-        if (percent <= 0) {
-            cpu.forEach { p ->
-                val path = "${p.policyPath}/scaling_min_freq"
-                val lowest = p.supportedFrequencies.minOrNull() ?: p.minFreq
-                shell.run("chmod 666 $path; echo $lowest > $path; chmod 644 $path")
-            }
-            return true
+        val commands = floorableClusters(cpu).map { policy ->
+            val cap = cat(policy.scalingMaxPath, shell)?.toIntOrNull()
+            val target = if (percent > 0) floorTargetFor(policy, percent, cap)
+                else policy.supportedFrequencies.minOrNull() ?: policy.minFreq
+            CpuClockProtection.write("${policy.policyPath}/scaling_min_freq", target, protect = percent > 0)
         }
-        // Raise: skip the PRIME (its min is the cap apply's 444-locked node) and clamp the rest to <= cap.
-        floorableClusters(cpu).forEach { p ->
-            // Never raise this cluster's min above its current cap (scaling_max) — that would make the
-            // kernel clamp the cap back up. Live-read the cap; fall back to the requested floor if absent.
-            val cap = cat("${p.policyPath}/scaling_max_freq", shell)?.toIntOrNull()
-            val target = floorTargetFor(p, percent, cap)
-            val path = "${p.policyPath}/scaling_min_freq"
-            shell.run("chmod 666 $path; echo $target > $path; chmod 644 $path")
-        }
-        return true
+        if (commands.isEmpty()) return false
+        return runCatching {
+            shell.run(CpuClockProtection.script(commands.joinToString("\n")))?.trim() == CpuClockProtection.SUCCESS
+        }.getOrDefault(false)
     }
 
     companion object {

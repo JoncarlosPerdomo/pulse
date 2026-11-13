@@ -1,0 +1,3 @@
+# Own CPU file permissions instead of repeatedly writing limits
+
+PULSE records original CPU minimum/maximum permissions before protecting a requested limit, and restores those permissions on intentional release or app-process death. A detached watcher checks the app PID and process start time rather than an awake-only heartbeat, so sleep and closing the main window retain protection; a root-private, boot-specific journal permits recovery on the next launch if both processes die. Requests already owned at the same value do not write again, because a higher effective minimum can come from an independent kernel frequency request rather than a vendor overwrite.

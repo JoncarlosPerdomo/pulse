@@ -44,12 +44,12 @@ class RootCommandLimitTest {
             commands += command
             if (command.startsWith("sh ")) {
                 script = scriptFile(command)
-                assertEquals(
-                    "chmod 666 $root/max_pwrlevel; chmod 666 $root/min_pwrlevel; " +
-                        "echo 3 > $root/max_pwrlevel; echo 3 > $root/min_pwrlevel; " +
-                        "chmod 444 $root/max_pwrlevel; chmod 444 $root/min_pwrlevel",
-                    script.readText(),
-                )
+                val contents = script.readText()
+                for (node in listOf("max_pwrlevel", "min_pwrlevel")) {
+                    assertTrue(contents.contains("echo 3 > $root/$node"))
+                    assertTrue(contents.contains("chmod 444 $root/$node"))
+                    assertTrue(contents.contains("if [ \"\$(cat $root/$node)\" != 3 ]"))
+                }
                 ""
             } else {
                 "3"
