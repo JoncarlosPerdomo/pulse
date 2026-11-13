@@ -132,9 +132,7 @@ private fun QuickAccessPanel(
     onAction: (QuickAccessAction) -> Unit,
 ) {
     val accent = MaterialTheme.colorScheme.primary
-    val tabs = QuickAccessTab.entries
-    var tabIndex by remember { mutableIntStateOf(0) }
-    var cursor by remember { mutableIntStateOf(0) }
+    var nav by remember { mutableStateOf(QuickAccessCursor()) }
     // Optimistic local values for the System sliders (brightness/volume) so ←/→/tap step instantly instead of
     // waiting a poll for the telemetry readback; re-synced from telemetry while not being touched. Keyed by id.
     val sliderLocal = remember { mutableStateMapOf<String, Int>() }
@@ -149,8 +147,8 @@ private fun QuickAccessPanel(
     // tab change.
     var pendingScope by remember { mutableStateOf<Int?>(null) }
     LaunchedEffect(settings.quickAccessPerGameScope) { pendingScope = null }
-    LaunchedEffect(tabIndex) { pendingScope = null }
-    val tab = tabs[tabIndex]
+    LaunchedEffect(nav.tab) { pendingScope = null }
+    val tab = nav.tab
     // Every applied control flashes its confirmation in the footer (browsing==editing made a silent apply a
     // real incident; the flash makes each one visible). Sliders + scope flash their own way (null label).
     val dispatch: (QuickAccessAction) -> Unit = { a ->
@@ -167,11 +165,10 @@ private fun QuickAccessPanel(
         QuickAccessTab.OVERLAY -> overlayItems(settings, dispatch)
         QuickAccessTab.SYSTEM -> systemItems(stats, sliderLocal, dispatch)
     }
-    // The intent collector is long-lived; rememberUpdatedState so it always sees the CURRENT list/tab (the
+    // The intent collector is long-lived; rememberUpdatedState so it always sees the CURRENT list (the
     // pointerInput/collector-captures-once gotcha).
     val curItems by rememberUpdatedState(items)
-    val curTabIndex by rememberUpdatedState(tabIndex)
-    LaunchedEffect(items.size) { cursor = QuickAccessNav.clampItem(cursor, items.size) }
+    LaunchedEffect(items.size) { nav = nav.clamp(items.size) }
     // Reconcile the optimistic System-slider values: once telemetry reports the value the device actually
     // reached, drop the local override so the slider re-syncs to the live system value (e.g. an external
     // brightness/volume change is then reflected) instead of sticking to a stale optimistic value forever.
@@ -183,13 +180,13 @@ private fun QuickAccessPanel(
     LaunchedEffect(Unit) {
         navIntents.collect { intent ->
             when (intent) {
-                QuickAccessNavIntent.TAB_PREV -> { tabIndex = QuickAccessNav.moveTab(curTabIndex, -1, tabs.size); cursor = 0 }
-                QuickAccessNavIntent.TAB_NEXT -> { tabIndex = QuickAccessNav.moveTab(curTabIndex, 1, tabs.size); cursor = 0 }
-                QuickAccessNavIntent.UP -> cursor = QuickAccessNav.moveItem(cursor, -1, curItems.size)
-                QuickAccessNavIntent.DOWN -> cursor = QuickAccessNav.moveItem(cursor, 1, curItems.size)
-                QuickAccessNavIntent.LEFT -> curItems.getOrNull(cursor)?.onLeft?.invoke()
-                QuickAccessNavIntent.RIGHT -> curItems.getOrNull(cursor)?.onRight?.invoke()
-                QuickAccessNavIntent.ACTIVATE -> curItems.getOrNull(cursor)?.onActivate?.invoke()
+                QuickAccessNavIntent.TAB_PREV -> nav = nav.moveTab(-1)
+                QuickAccessNavIntent.TAB_NEXT -> nav = nav.moveTab(1)
+                QuickAccessNavIntent.UP -> nav = nav.moveItem(-1, curItems.size)
+                QuickAccessNavIntent.DOWN -> nav = nav.moveItem(1, curItems.size)
+                QuickAccessNavIntent.LEFT -> curItems.getOrNull(nav.item)?.onLeft?.invoke()
+                QuickAccessNavIntent.RIGHT -> curItems.getOrNull(nav.item)?.onRight?.invoke()
+                QuickAccessNavIntent.ACTIVATE -> curItems.getOrNull(nav.item)?.onActivate?.invoke()
             }
         }
     }
@@ -224,11 +221,11 @@ private fun QuickAccessPanel(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                RailIcon(Icons.Rounded.Bolt, tab == QuickAccessTab.PERFORMANCE) { tabIndex = 0; cursor = 0 }
-                RailIcon(Icons.Rounded.Air, tab == QuickAccessTab.FAN) { tabIndex = 1; cursor = 0 }
-                RailIcon(Icons.Rounded.Lightbulb, tab == QuickAccessTab.RGB) { tabIndex = 2; cursor = 0 }
-                RailIcon(Icons.Rounded.Dashboard, tab == QuickAccessTab.OVERLAY) { tabIndex = 3; cursor = 0 }
-                RailIcon(Icons.Rounded.Tune, tab == QuickAccessTab.SYSTEM) { tabIndex = 4; cursor = 0 }
+                RailIcon(Icons.Rounded.Bolt, tab == QuickAccessTab.PERFORMANCE) { nav = nav.selectTab(QuickAccessTab.PERFORMANCE) }
+                RailIcon(Icons.Rounded.Air, tab == QuickAccessTab.FAN) { nav = nav.selectTab(QuickAccessTab.FAN) }
+                RailIcon(Icons.Rounded.Lightbulb, tab == QuickAccessTab.RGB) { nav = nav.selectTab(QuickAccessTab.RGB) }
+                RailIcon(Icons.Rounded.Dashboard, tab == QuickAccessTab.OVERLAY) { nav = nav.selectTab(QuickAccessTab.OVERLAY) }
+                RailIcon(Icons.Rounded.Tune, tab == QuickAccessTab.SYSTEM) { nav = nav.selectTab(QuickAccessTab.SYSTEM) }
             }
             Column(
                 modifier = Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()).padding(14.dp),
@@ -242,7 +239,7 @@ private fun QuickAccessPanel(
                 Text(tabTitle(tab), color = QaColors.Text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                 TelemetryStrip(stats)
                 Box(Modifier.fillMaxWidth().height(1.dp).background(QaColors.Outline))
-                items.forEachIndexed { i, item -> item.render(i == cursor) }
+                items.forEachIndexed { i, item -> item.render(i == nav.item) }
             }
         }
         Row(

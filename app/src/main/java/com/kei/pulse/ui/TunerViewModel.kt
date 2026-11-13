@@ -618,23 +618,26 @@ class TunerViewModel(
      */
     fun autocalibrateFan(onDone: () -> Unit = {}) {
         if (_fanCalibrating.value) return
+        _fanCalibrating.value = true
         viewModelScope.launch {
-            val supported = withContext(Dispatchers.IO) {
-                FanController.customFanAvailable()
+            try {
+                val supported = withContext(Dispatchers.IO) {
+                    FanController.customFanAvailable()
+                }
+                if (!supported) {
+                    transientError.value = "Custom fan isn't available on this device"
+                    return@launch
+                }
+                transientMessage.value = "Calibrating fan — sweeping speeds (~15s)…"
+                val cal = withContext(Dispatchers.IO) { runFanSweep() }
+                settingsStorage.persistFanCurve(cal.recommendedCurve)
+                transientMessage.value =
+                    "Fan calibrated · idle ${cal.minSpinPercent}% · comfort ${cal.comfortPercent}% · ${cal.maxRpm} RPM max"
+                transientError.value = null
+                onDone() // restart the watcher so the new curve + Custom mode re-engage and retake the fan
+            } finally {
+                _fanCalibrating.value = false
             }
-            if (!supported) {
-                transientError.value = "Custom fan isn't available on this device"
-                return@launch
-            }
-            _fanCalibrating.value = true
-            transientMessage.value = "Calibrating fan — sweeping speeds (~15s)…"
-            val cal = withContext(Dispatchers.IO) { runFanSweep() }
-            settingsStorage.persistFanCurve(cal.recommendedCurve)
-            _fanCalibrating.value = false
-            transientMessage.value =
-                "Fan calibrated · idle ${cal.minSpinPercent}% · comfort ${cal.comfortPercent}% · ${cal.maxRpm} RPM max"
-            transientError.value = null
-            onDone() // restart the watcher so the new curve + Custom mode re-engage and retake the fan
         }
     }
 

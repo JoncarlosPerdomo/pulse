@@ -15,7 +15,7 @@ class ProfileStateResolverTest {
 
         val state = ProfileStateResolver.resolve(
             TunerState(
-                isLoading = false,
+                link = DeviceLink.UNSUPPORTED,
                 policies = policies,
                 actualValues = policies.associate { it.id to it.currentMaxFreq },
                 currentValues = policies.associate { it.id to it.selectableMaxFreq },
@@ -35,7 +35,7 @@ class ProfileStateResolverTest {
 
         val state = ProfileStateResolver.resolve(
             TunerState(
-                isLoading = false,
+                link = DeviceLink.UNSUPPORTED,
                 policies = policies,
                 actualValues = mapOf(0 to 2_500_000),
                 currentValues = mapOf(0 to 2_500_000),
@@ -68,7 +68,7 @@ class ProfileStateResolverTest {
 
         val state = ProfileStateResolver.resolve(
             TunerState(
-                isLoading = false,
+                link = DeviceLink.UNSUPPORTED,
                 policies = policies,
                 actualValues = policies.associate { it.id to it.currentMaxFreq },
                 currentValues = policies.associate { it.id to it.selectableMaxFreq },
@@ -99,7 +99,7 @@ class ProfileStateResolverTest {
 
         val state = ProfileStateResolver.resolve(
             TunerState(
-                isLoading = false,
+                link = DeviceLink.UNSUPPORTED,
                 policies = policies,
                 actualValues = mapOf(3 to 2_803_200),
                 currentValues = mapOf(3 to 2_707_200),

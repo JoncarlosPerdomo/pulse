@@ -29,3 +29,16 @@ object QuickAccessNav {
     fun clampItem(item: Int, itemCount: Int): Int =
         if (itemCount <= 0) 0 else item.coerceIn(0, itemCount - 1)
 }
+
+/** Where the controller cursor sits: a rail [tab] and an [item] in it. Switching tabs starts at the top. */
+data class QuickAccessCursor(val tab: QuickAccessTab = QuickAccessTab.entries.first(), val item: Int = 0) {
+    fun selectTab(tab: QuickAccessTab): QuickAccessCursor = QuickAccessCursor(tab)
+
+    fun moveTab(delta: Int): QuickAccessCursor =
+        selectTab(QuickAccessTab.entries[QuickAccessNav.moveTab(tab.ordinal, delta, QuickAccessTab.entries.size)])
+
+    fun moveItem(delta: Int, itemCount: Int): QuickAccessCursor =
+        copy(item = QuickAccessNav.moveItem(item, delta, itemCount))
+
+    fun clamp(itemCount: Int): QuickAccessCursor = copy(item = QuickAccessNav.clampItem(item, itemCount))
+}

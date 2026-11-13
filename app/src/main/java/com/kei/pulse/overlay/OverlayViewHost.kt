@@ -1,6 +1,7 @@
 package com.kei.pulse.overlay
 
 import android.content.Context
+import android.view.WindowManager
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.ComposeView
 import androidx.lifecycle.Lifecycle
@@ -52,3 +53,6 @@ class OverlayViewHost(context: Context) : LifecycleOwner, ViewModelStoreOwner, S
         viewModelStore.clear()
     }
 }
+
+/** An overlay window added to the WindowManager: its Compose [host] and the live layout [params]. */
+class AttachedOverlay(val host: OverlayViewHost, val params: WindowManager.LayoutParams)

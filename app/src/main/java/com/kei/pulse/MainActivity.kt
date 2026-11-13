@@ -1,10 +1,12 @@
 package com.kei.pulse
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -24,6 +26,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.kei.pulse.appwatch.ForegroundAppMonitorService
 import com.kei.pulse.data.TelemetryReader
+import com.kei.pulse.model.FeatureGrantFlow
+import com.kei.pulse.model.GatedFeature
+import com.kei.pulse.model.GrantStep
+import com.kei.pulse.model.PendingGrant
+import com.kei.pulse.model.SpecialAccess
 import com.kei.pulse.overlay.PerformanceOverlay
 import com.kei.pulse.sleep.SleepProfileMonitorService
 import com.kei.pulse.tile.QuickSettingsTileAddResult
@@ -84,6 +91,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingGrant = savedInstanceState?.let { state ->
+            val feature = state.getString(STATE_GRANT_FEATURE) ?: return@let null
+            val awaiting = state.getString(STATE_GRANT_AWAITING) ?: return@let null
+            PendingGrant(GatedFeature.valueOf(feature), SpecialAccess.valueOf(awaiting))
+        }
         enableEdgeToEdge()
         maybeRequestQuickSettingsTileOnFirstRun()
         maybePromptBatteryExemption()
@@ -113,8 +125,7 @@ class MainActivity : ComponentActivity() {
                     val autoTdpAggressivePark = viewModel.autoTdpAggressivePark.collectAsStateWithLifecycle().value
                     val autoTdpBias = viewModel.autoTdpBias.collectAsStateWithLifecycle().value
                     val estimatedPeakW = viewModel.estimatedPeakW.collectAsStateWithLifecycle().value
-                    var showSettings by rememberSaveable { mutableStateOf(false) }
-                    var showPerApps by rememberSaveable { mutableStateOf(false) }
+                    var screen by rememberSaveable { mutableStateOf(Screen.TUNER) }
                     val perAppEnabled = viewModel.perAppEnabled.collectAsStateWithLifecycle().value
                     val perAppConfigs = viewModel.perAppConfigs.collectAsStateWithLifecycle().value
                     val perAppSwitchNotices = viewModel.perAppSwitchNotices.collectAsStateWithLifecycle().value
@@ -130,12 +141,13 @@ class MainActivity : ComponentActivity() {
                     }
 
                     // System / controller back navigates out of sub-screens instead of exiting.
-                    BackHandler(enabled = showPerApps || showSettings) {
-                        if (showPerApps) showPerApps = false else showSettings = false
+                    BackHandler(enabled = screen.parent != null) {
+                        screen.parent?.let { screen = it }
                     }
 
                     CompositionLocalProvider(LocalThermalHeat provides heatForTier(activeTier)) {
-                    if (showPerApps) {
+                    when (screen) {
+                    Screen.PER_APPS -> {
                         PerAppScreen(
                             configs = perAppConfigs,
                             learnedPackages = viewModel.autoTdpLearnedPackages.collectAsStateWithLifecycle().value,
@@ -146,12 +158,13 @@ class MainActivity : ComponentActivity() {
                             defaultAggressivePark = autoTdpAggressivePark,
                             onSaveConfig = ::onSavePerAppConfig,
                             onRemoveConfig = viewModel::removePerAppConfig,
-                            onBack = { showPerApps = false },
+                            onBack = { screen = Screen.SETTINGS },
                         )
-                    } else if (showSettings) {
+                    }
+                    Screen.SETTINGS -> {
                         SettingsScreen(
                             settings = settings,
-                            onBack = { showSettings = false },
+                            onBack = { screen = Screen.TUNER },
                             onPulseEnabledChange = ::onPulseMasterToggle,
                             onRgbModeChange = ::onRgbModeSelected,
                             onRgbManualTargetChange = viewModel::setRgbManualTarget,
@@ -193,7 +206,7 @@ class MainActivity : ComponentActivity() {
                             perAppEnabled = perAppEnabled,
                             perAppConfiguredCount = perAppConfigs.size,
                             onPerAppEnabledChange = ::setPerAppProfilesEnabled,
-                            onOpenPerApps = { showPerApps = true },
+                            onOpenPerApps = { screen = Screen.PER_APPS },
                             perAppSwitchNotices = perAppSwitchNotices,
                             onPerAppSwitchNoticesChange = viewModel::setPerAppSwitchNotices,
                             overlayEnabled = settings.overlayEnabled,
@@ -210,7 +223,8 @@ class MainActivity : ComponentActivity() {
                             onClearQuickAccessCombo = viewModel::clearQuickAccessCombo,
                             capturingCombo = viewModel.capturingCombo.collectAsStateWithLifecycle().value,
                         )
-                    } else {
+                    }
+                    Screen.TUNER -> {
                         MainTunerScreen(
                             state = state,
                             sleepProfileId = settings.sleepProfileId.takeIf { settings.sleepProfileEnabled },
@@ -224,7 +238,7 @@ class MainActivity : ComponentActivity() {
                             onUpdateProfile = viewModel::updateProfile,
                             onDeleteProfile = viewModel::deleteProfile,
                             onMoveProfile = viewModel::moveProfile,
-                            onOpenSettings = { showSettings = true },
+                            onOpenSettings = { screen = Screen.SETTINGS },
                             onRefreshLiveValues = viewModel::refreshLiveState,
                             estimatedPeakW = estimatedPeakW,
                             onStatusMessageShown = viewModel::consumeStatusMessage,
@@ -294,78 +308,81 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     }
+                    }
                 }
             }
         }
     }
 
-    // Set when the user flips per-app profiles on without Usage access: we bounce them to the
-    // system grant screen and finish enabling automatically when they come back with it granted.
-    private var pendingPerAppEnable = false
+    /** A feature waiting on the user to grant special access in system Settings; finished in [onResume]. */
+    private var pendingGrant: PendingGrant? = null
 
-    // Set when the user flips the overlay on without the "display over other apps" permission:
-    // we bounce them to the system grant screen and finish enabling when they return with it.
-    private var pendingOverlayEnable = false
-    private var pendingQuickAccessEnable = false
-
-    // Set when AutoTDP (global default) is flipped on without Usage access — same bounce/return flow.
-    private var pendingAutoTdpEnable = false
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        pendingGrant?.let {
+            outState.putString(STATE_GRANT_FEATURE, it.feature.name)
+            outState.putString(STATE_GRANT_AWAITING, it.awaiting.name)
+        }
+    }
 
     override fun onResume() {
         super.onResume()
         // PULSE's UI is on screen — the OSD must never draw over it (a focused text field makes the foreground
         // probe report the keyboard's package, which used to leak the OSD over our own settings).
         ForegroundAppMonitorService.uiInForeground = true
-        if (pendingPerAppEnable) {
-            pendingPerAppEnable = false
-            if (ForegroundAppMonitorService.hasUsageAccess(this)) {
-                Toast.makeText(applicationContext, "Per-app profiles enabled", Toast.LENGTH_SHORT).show()
-                enablePerAppProfiles()
+        val pending = pendingGrant ?: return
+        pendingGrant = null
+        val step = FeatureGrantFlow.resume(pending, grantedAccess())
+        if (step is GrantStep.Enable) toast("${step.feature.label} enabled")
+        advance(step)
+    }
+
+    private fun requestFeature(feature: GatedFeature) = advance(FeatureGrantFlow.start(feature, grantedAccess()))
+
+    private fun advance(step: GrantStep) {
+        when (step) {
+            is GrantStep.Enable -> when (step.feature) {
+                GatedFeature.PER_APP -> enablePerAppProfiles()
+                GatedFeature.AUTO_TDP -> enableAutoTdpDefault()
+                GatedFeature.OVERLAY -> enableOverlay()
+                GatedFeature.QUICK_ACCESS -> enableQuickAccess()
             }
-        }
-        if (pendingOverlayEnable) {
-            pendingOverlayEnable = false
-            if (PerformanceOverlay.hasPermission(this)) {
-                if (ForegroundAppMonitorService.hasUsageAccess(this)) {
-                    enableOverlay()
-                    Toast.makeText(applicationContext, "Overlay enabled", Toast.LENGTH_SHORT).show()
-                } else {
-                    // Overlay permission is in; the OSD also needs Usage access to know the foreground app.
-                    pendingOverlayEnable = true
-                    startActivity(android.content.Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS))
-                    Toast.makeText(
-                        applicationContext,
-                        "The overlay needs Usage access to know which game is on screen. Allow it for PULSE, then come back.",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                }
+            is GrantStep.Request -> {
+                pendingGrant = step.pending
+                startActivity(step.pending.awaiting.settingsIntent())
+                toast(step.pending.requestMessage(), Toast.LENGTH_LONG)
             }
-        }
-        if (pendingQuickAccessEnable) {
-            pendingQuickAccessEnable = false
-            if (PerformanceOverlay.hasPermission(this)) {
-                if (ForegroundAppMonitorService.hasUsageAccess(this)) {
-                    enableQuickAccess()
-                    Toast.makeText(applicationContext, "Quick Access bar enabled", Toast.LENGTH_SHORT).show()
-                } else {
-                    pendingQuickAccessEnable = true
-                    startActivity(android.content.Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS))
-                    Toast.makeText(
-                        applicationContext,
-                        "The Quick Access bar needs Usage access to know which game is on screen. Allow it for PULSE, then come back.",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                }
-            }
-        }
-        if (pendingAutoTdpEnable) {
-            pendingAutoTdpEnable = false
-            if (ForegroundAppMonitorService.hasUsageAccess(this)) {
-                Toast.makeText(applicationContext, "AutoTDP enabled", Toast.LENGTH_SHORT).show()
-                enableAutoTdpDefault()
-            }
+            is GrantStep.Declined -> toast(step.pending.declinedMessage())
         }
     }
+
+    private fun grantedAccess(): Set<SpecialAccess> = buildSet {
+        if (PerformanceOverlay.hasPermission(this@MainActivity)) add(SpecialAccess.DRAW_OVERLAY)
+        if (ForegroundAppMonitorService.hasUsageAccess(this@MainActivity)) add(SpecialAccess.USAGE_ACCESS)
+    }
+
+    private fun SpecialAccess.settingsIntent(): Intent = when (this) {
+        SpecialAccess.DRAW_OVERLAY -> Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+        SpecialAccess.USAGE_ACCESS -> Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
+    }
+
+    private fun PendingGrant.requestMessage(): String = when (awaiting) {
+        SpecialAccess.DRAW_OVERLAY -> "Allow \"Display over other apps\" for PULSE, then come back"
+        SpecialAccess.USAGE_ACCESS -> when (feature) {
+            GatedFeature.PER_APP -> "Per-app profiles need Usage access to detect the foreground app."
+            GatedFeature.AUTO_TDP -> "AutoTDP needs Usage access to see which game is running."
+            GatedFeature.OVERLAY -> "The overlay needs Usage access to know which game is on screen."
+            GatedFeature.QUICK_ACCESS -> "The Quick Access bar needs Usage access to know which game is on screen."
+        } + " Allow it for PULSE, then come back."
+    }
+
+    private fun PendingGrant.declinedMessage(): String = when (awaiting) {
+        SpecialAccess.DRAW_OVERLAY -> "${feature.label} stays off — \"Display over other apps\" wasn't allowed"
+        SpecialAccess.USAGE_ACCESS -> "${feature.label} stays off — Usage access wasn't allowed"
+    }
+
+    private fun toast(message: String, duration: Int = Toast.LENGTH_SHORT) =
+        Toast.makeText(applicationContext, message, duration).show()
 
     override fun onPause() {
         super.onPause()
@@ -379,17 +396,7 @@ class MainActivity : ComponentActivity() {
             viewModel.setAutoTdpDefault(false)
             return
         }
-        if (!ForegroundAppMonitorService.hasUsageAccess(this)) {
-            pendingAutoTdpEnable = true
-            startActivity(android.content.Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS))
-            Toast.makeText(
-                applicationContext,
-                "AutoTDP needs Usage access to see which game is running. Allow it for PULSE, then come back.",
-                Toast.LENGTH_LONG,
-            ).show()
-            return
-        }
-        enableAutoTdpDefault()
+        requestFeature(GatedFeature.AUTO_TDP)
     }
 
     private fun enableAutoTdpDefault() {
@@ -403,35 +410,7 @@ class MainActivity : ComponentActivity() {
             viewModel.setOverlayEnabled(false)
             return
         }
-        if (!PerformanceOverlay.hasPermission(this)) {
-            // "Display over other apps" is a special permission granted only from system settings.
-            pendingOverlayEnable = true
-            startActivity(
-                android.content.Intent(
-                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:$packageName"),
-                ),
-            )
-            Toast.makeText(
-                applicationContext,
-                "Allow \"Display over other apps\" for PULSE, then come back",
-                Toast.LENGTH_LONG,
-            ).show()
-            return
-        }
-        if (!ForegroundAppMonitorService.hasUsageAccess(this)) {
-            // The OSD watcher needs Usage access to know which app is in front (and to avoid the
-            // launcher). Bounce to the grant screen and finish in onResume.
-            pendingOverlayEnable = true
-            startActivity(android.content.Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS))
-            Toast.makeText(
-                applicationContext,
-                "The overlay needs Usage access to know which game is on screen. Allow it for PULSE, then come back.",
-                Toast.LENGTH_LONG,
-            ).show()
-            return
-        }
-        enableOverlay()
+        requestFeature(GatedFeature.OVERLAY)
     }
 
     /**
@@ -525,32 +504,7 @@ class MainActivity : ComponentActivity() {
             viewModel.setQuickAccess(false)
             return
         }
-        if (!PerformanceOverlay.hasPermission(this)) {
-            pendingQuickAccessEnable = true
-            startActivity(
-                android.content.Intent(
-                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:$packageName"),
-                ),
-            )
-            Toast.makeText(
-                applicationContext,
-                "Allow \"Display over other apps\" for PULSE, then come back",
-                Toast.LENGTH_LONG,
-            ).show()
-            return
-        }
-        if (!ForegroundAppMonitorService.hasUsageAccess(this)) {
-            pendingQuickAccessEnable = true
-            startActivity(android.content.Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS))
-            Toast.makeText(
-                applicationContext,
-                "The Quick Access bar needs Usage access to know which game is on screen. Allow it for PULSE, then come back.",
-                Toast.LENGTH_LONG,
-            ).show()
-            return
-        }
-        enableQuickAccess()
+        requestFeature(GatedFeature.QUICK_ACCESS)
     }
 
     private fun enableQuickAccess() {
@@ -565,19 +519,7 @@ class MainActivity : ComponentActivity() {
             }
             return
         }
-        if (!ForegroundAppMonitorService.hasUsageAccess(this)) {
-            // The special permission can only be granted from system settings; send the user
-            // there and finish enabling in onResume once it's granted.
-            pendingPerAppEnable = true
-            startActivity(android.content.Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS))
-            Toast.makeText(
-                applicationContext,
-                "Per-app profiles need Usage access to detect the foreground app. Allow it for PULSE, then come back.",
-                Toast.LENGTH_LONG,
-            ).show()
-            return
-        }
-        enablePerAppProfiles()
+        requestFeature(GatedFeature.PER_APP)
     }
 
     private fun enablePerAppProfiles() {
@@ -604,13 +546,7 @@ class MainActivity : ComponentActivity() {
             if (ForegroundAppMonitorService.hasUsageAccess(this)) {
                 ForegroundAppMonitorService.start(this)
             } else {
-                pendingPerAppEnable = true
-                startActivity(android.content.Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS))
-                Toast.makeText(
-                    applicationContext,
-                    "Per-app profiles need Usage access to detect the foreground app — allow it for PULSE.",
-                    Toast.LENGTH_LONG,
-                ).show()
+                requestFeature(GatedFeature.PER_APP)
             }
         }
     }
@@ -736,5 +672,17 @@ class MainActivity : ComponentActivity() {
             QuickSettingsTileAddResult.UNAVAILABLE -> "Quick Settings tile prompt is unavailable on this device"
             QuickSettingsTileAddResult.ERROR -> "Failed to request Quick Settings tile"
         }
+    }
+
+    /** The app's screens; back goes to [parent]. */
+    private enum class Screen(val parent: Screen?) {
+        TUNER(null),
+        SETTINGS(TUNER),
+        PER_APPS(SETTINGS),
+    }
+
+    private companion object {
+        const val STATE_GRANT_FEATURE = "pendingGrantFeature"
+        const val STATE_GRANT_AWAITING = "pendingGrantAwaiting"
     }
 }

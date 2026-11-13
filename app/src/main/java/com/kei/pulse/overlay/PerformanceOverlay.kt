@@ -27,12 +27,10 @@ class PerformanceOverlay(private val context: Context) {
     private val statsFlow = MutableStateFlow(OverlayStats())
     private val configFlow = MutableStateFlow(OverlayConfig())
 
-    private var host: OverlayViewHost? = null
-    private var params: WindowManager.LayoutParams? = null
-
     @Volatile
-    var isShowing = false
-        private set
+    private var window: AttachedOverlay? = null
+
+    val isShowing: Boolean get() = window != null
 
     private var themeSettings: AppSettings = AppSettings()
     private var onMoved: ((x: Int, y: Int) -> Unit)? = null
@@ -63,7 +61,7 @@ class PerformanceOverlay(private val context: Context) {
         this.onPresetCycled = onPresetCycled
         this.onLockToggled = onLockToggled
         main.post {
-            if (host != null) {
+            if (window != null) {
                 reapply(config)
                 return@post
             }
@@ -88,21 +86,17 @@ class PerformanceOverlay(private val context: Context) {
                 return@post
             }
             newHost.onResumed()
-            host = newHost
-            params = lp
-            isShowing = true
+            window = AttachedOverlay(newHost, lp)
         }
     }
 
     fun hide() {
         main.post {
-            host?.let { h ->
-                runCatching { windowManager?.removeView(h.composeView) }
-                h.onDestroyed()
+            window?.let { w ->
+                runCatching { windowManager?.removeView(w.host.composeView) }
+                w.host.onDestroyed()
             }
-            host = null
-            params = null
-            isShowing = false
+            window = null
         }
     }
 
@@ -133,19 +127,20 @@ class PerformanceOverlay(private val context: Context) {
         main.post {
             // The docked Compact bar is pinned full-width to the top — not draggable.
             if (isDocked(configFlow.value)) return@post
-            val lp = params ?: return@post
+            val w = window ?: return@post
+            val lp = w.params
             // Clamp to the screen so the HUD can't be dragged fully off-edge (and that off-screen
             // X/Y then persisted, stranding it invisible with no reset). FLAG_LAYOUT_NO_LIMITS means
             // nothing else bounds it. View is measured by now (added + shown), so width/height are valid.
             val bounds = windowManager?.maximumWindowMetrics?.bounds
-            val view = host?.composeView
-            val maxX = bounds?.let { (it.width() - (view?.width ?: 0)).coerceAtLeast(0) }
-            val maxY = bounds?.let { (it.height() - (view?.height ?: 0)).coerceAtLeast(0) }
+            val view = w.host.composeView
+            val maxX = bounds?.let { (it.width() - view.width).coerceAtLeast(0) }
+            val maxY = bounds?.let { (it.height() - view.height).coerceAtLeast(0) }
             lp.x = (lp.x + dx.toInt()).coerceAtLeast(0).let { x -> maxX?.let { x.coerceAtMost(it) } ?: x }
             lp.y = (lp.y + dy.toInt()).coerceAtLeast(0).let { y -> maxY?.let { y.coerceAtMost(it) } ?: y }
             floatX = lp.x
             floatY = lp.y
-            runCatching { windowManager?.updateViewLayout(host?.composeView, lp) }
+            runCatching { windowManager?.updateViewLayout(view, lp) }
             onMoved?.invoke(lp.x, lp.y)
         }
     }
@@ -154,9 +149,9 @@ class PerformanceOverlay(private val context: Context) {
 
     /** Re-apply geometry + flags to the live window (preset change, lock toggle, or re-show). */
     private fun reapply(config: OverlayConfig) {
-        val lp = params ?: return
-        applyGeometry(lp, config)
-        runCatching { windowManager?.updateViewLayout(host?.composeView, lp) }
+        val w = window ?: return
+        applyGeometry(w.params, config)
+        runCatching { windowManager?.updateViewLayout(w.host.composeView, w.params) }
     }
 
     private fun newParams(config: OverlayConfig) = WindowManager.LayoutParams(
