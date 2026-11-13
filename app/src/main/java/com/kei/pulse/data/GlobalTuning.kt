@@ -205,7 +205,7 @@ class GlobalTuning(
         mutex.withLock {
             val policies = caps.policies()
             withManualClockOwnership {
-                writeCapsReassertingGpuUnderOwnership(policies) { caps.applyDisplayProfileById(profileId) }.toOutcome()
+                writeCapsPreservingControlsUnderOwnership(policies) { caps.applyDisplayProfileById(profileId) }.toOutcome()
             }
         }
     }
@@ -223,24 +223,24 @@ class GlobalTuning(
         }
 
     /**
-     * Runs [writeCaps] and restores the GPU lock or floor under global tuning and clock ownership.
+     * Runs [writeCaps] and preserves the CPU floor and GPU lock or floor under clock ownership.
      * A bound game blocks the write; following-global AutoTDP is released before the write.
      * Callers must hold neither this module's mutex nor clock ownership.
      */
-    suspend fun writeCapsReassertingGpu(
+    suspend fun writeCapsPreservingControls(
         policies: List<CpuPolicyInfo>,
         gpuFloorPercent: Int? = null,
         writeCaps: suspend () -> Result<PerformanceRepository.ApplyOutcome>,
     ): TuningOutcome = withContext(Dispatchers.IO) {
         mutex.withLock {
             withManualClockOwnership {
-                writeCapsReassertingGpuUnderOwnership(policies, gpuFloorPercent, writeCaps).toOutcome()
+                writeCapsPreservingControlsUnderOwnership(policies, gpuFloorPercent, writeCaps).toOutcome()
             }
         }
     }
 
-    /** [writeCapsReassertingGpu] for a caller already inside [ClockOwnership.withOwnership], which must not re-enter it. */
-    suspend fun <T> writeCapsReassertingGpuUnderOwnership(
+    /** [writeCapsPreservingControls] for a caller already inside [ClockOwnership.withOwnership], which must not re-enter it. */
+    suspend fun <T> writeCapsPreservingControlsUnderOwnership(
         policies: List<CpuPolicyInfo>,
         gpuFloorPercent: Int? = null,
         writeCaps: suspend () -> T,
@@ -249,6 +249,9 @@ class GlobalTuning(
         val side = if (gpuFloorPercent == null) global else global.copy(gpuLocked = false, gpuFloorPercent = gpuFloorPercent)
         val result = writeCaps()
         reapplyGpuControl(policies, side)
+        if (side.cpuFloorPercent > 0) {
+            check(cpuFloor.setFloor(policies, side.cpuFloorPercent)) { "CPU floor write failed" }
+        }
         result
     }
 
@@ -259,9 +262,10 @@ class GlobalTuning(
         persistAsCustom: Boolean,
         side: SideControlState,
     ): Result<PerformanceRepository.ApplyOutcome> {
-        val result = caps.applyCaps(policies, values, isReset, persistAsCustom)
-        reapplyControlsReleasedByCaps(policies, side)
-        return result
+        return caps.applyCaps(policies, values, isReset, persistAsCustom).mapCatching { applied ->
+            reapplyControlsReleasedByCaps(policies, side)
+            applied
+        }
     }
 
     private suspend fun applyPreset(policies: List<CpuPolicyInfo>, tier: PowerTier): TuningOutcome {
@@ -273,7 +277,7 @@ class GlobalTuning(
             side = SideControlState.CLEARED,
         )
         val applied = result.getOrElse { return TuningOutcome.Failed(FailureReason.WRITE_FAILED, it.message) }
-        cpuFloor.setFloor(policies, 0)
+        if (!cpuFloor.setFloor(policies, 0)) return TuningOutcome.Failed(FailureReason.WRITE_FAILED)
         return TuningOutcome.Applied(caps = applied, governor = tier.governorLabel?.let { setGovernor(policies, it) })
     }
 
@@ -326,7 +330,9 @@ class GlobalTuning(
 
     private fun reapplyControlsReleasedByCaps(policies: List<CpuPolicyInfo>, side: SideControlState) {
         reapplyGpuControl(policies, side)
-        if (side.cpuFloorPercent > 0) cpuFloor.setFloor(policies, side.cpuFloorPercent)
+        if (side.cpuFloorPercent > 0) {
+            check(cpuFloor.setFloor(policies, side.cpuFloorPercent)) { "CPU floor write failed" }
+        }
         val prime = primeOf(policies)
         if (side.primeCoreBoostLimited && !side.powerTargetEnabled && prime != null) {
             AutoTuneController.applyFreqsToDevice(policies, mapOf(prime.id to noTurboFreq(prime)), shell)

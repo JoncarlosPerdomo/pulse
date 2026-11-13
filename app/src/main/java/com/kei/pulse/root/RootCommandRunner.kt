@@ -16,11 +16,13 @@ class RootCommandRunner(
 
     suspend fun executeScript(script: String): Result<String?> = withContext(dispatcher) {
         runCatching {
-            RootSupport.runGeneratedScript(
+            val output = RootSupport.runGeneratedScript(
                 context = context,
                 scriptName = "apply-frequencies.sh",
                 scriptContents = script,
             )
+            check(output?.trim() == CpuClockProtection.SUCCESS) { "CPU clock write failed: ${output.orEmpty()}" }
+            output
         }
     }
 }

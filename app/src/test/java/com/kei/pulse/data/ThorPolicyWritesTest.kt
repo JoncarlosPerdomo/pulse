@@ -3,6 +3,8 @@ package com.kei.pulse.data
 import com.kei.pulse.model.CpuPolicyInfo
 import com.kei.pulse.root.PrivilegedShell
 import com.kei.pulse.root.RootSupport
+import com.kei.pulse.root.CpuClockProtection
+import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -27,15 +29,22 @@ class ThorPolicyWritesTest {
         scalingMaxPath = "/sys/class/kgsl/kgsl-3d0/max_pwrlevel",
     )
     private val commands = mutableListOf<String>()
-    private val shell = PrivilegedShell { command ->
+    private val scripts = mutableListOf<String>()
+    private val transport = PrivilegedShell { command ->
         assertTrue("PServer truncates ${command.length} characters: $command", command.length <= RootSupport.PSERVER_COMMAND_LIMIT)
         commands += command
         when {
+            command.startsWith("sh '") -> {
+                val file = File(command.removePrefix("sh '").removeSuffix("'"))
+                scripts += file.readText()
+                CpuClockProtection.SUCCESS
+            }
             "scaling_available_governors" in command -> "walt performance powersave"
             "scaling_max_freq" in command -> "2000000"
             else -> ""
         }
     }
+    private val shell = PrivilegedShell { RootSupport.runRootCommand(it, transport) }
 
     @Test
     fun `governor selection writes every CPU policy within the inline limit`() {
@@ -52,13 +61,18 @@ class ThorPolicyWritesTest {
     @Test
     fun `floor raise writes non-prime policies within the inline limit`() {
         assertTrue(CpuFloorController(shell).setFloor(cpu + gpu, 50))
-        assertWrites(cpu.dropLast(1), "scaling_min_freq", "1000000")
+        assertFloorWrites("1000000", protect = 1)
     }
 
     @Test
-    fun `floor reset writes every CPU policy within the inline limit`() {
+    fun `floor reset leaves the prime cap minimum untouched within the inline limit`() {
         assertTrue(CpuFloorController(shell).setFloor(cpu.map { it.copy(minFreq = 1_000_000) } + gpu, 0))
-        assertWrites(cpu, "scaling_min_freq", "300000")
+        assertFloorWrites("300000", protect = 0)
+    }
+
+    private fun assertFloorWrites(value: String, protect: Int) {
+        assertEquals(cpu.dropLast(1).map { "cpu_write '${it.policyPath}/scaling_min_freq' $value $protect" },
+            scripts.single().lineSequence().filter { it.startsWith("cpu_write ") }.toList())
     }
 
     private fun assertWrites(policies: List<CpuPolicyInfo>, node: String, value: String) {

@@ -20,8 +20,11 @@ object RootSupport {
     // there is no re-entrancy.
     private val pServerLock = ReentrantLock()
 
-    fun runRootCommand(command: String): String? =
-        runRootCommand(command, PrivilegedShell { RootExec().executeAsRoot(it).getOrNull() })
+    fun runRootCommand(command: String): String? {
+        val result = runRootCommand(command, PrivilegedShell { RootExec().executeAsRoot(it).getOrNull() })
+        check(result?.trim() != CpuClockProtection.ERROR) { "CPU permission ownership or write failed" }
+        return result
+    }
 
     internal fun runRootCommand(command: String, shell: PrivilegedShell): String? = pServerLock.withLock {
         if (command.length <= PSERVER_COMMAND_LIMIT) return shell.run(command)

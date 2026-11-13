@@ -749,7 +749,7 @@ class TunerViewModel(
 
         viewModelScope.launch {
             val appliedProfile = ProfileStateResolver.preferredProfileForCurrentValues(state)
-            val applyResult = globalTuning.writeCapsReassertingGpu(state.policies) {
+            val applyResult = globalTuning.writeCapsPreservingControls(state.policies) {
                 repository.applyValues(
                     policies = state.policies,
                     selectedValues = state.currentValues,

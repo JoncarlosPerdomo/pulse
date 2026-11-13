@@ -86,7 +86,7 @@ class TileControlActivity : ComponentActivity() {
     private fun applyCurrentFromDialog(state: TunerState) {
         lifecycleScope.launch {
             val appliedProfile = ProfileStateResolver.preferredProfileForCurrentValues(state)
-            val result = container.globalTuning.writeCapsReassertingGpu(state.policies) {
+            val result = container.globalTuning.writeCapsPreservingControls(state.policies) {
                 container.repository.applyValues(
                     policies = state.policies,
                     selectedValues = state.currentValues,

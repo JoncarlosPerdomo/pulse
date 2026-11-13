@@ -176,7 +176,7 @@ class GlobalTuningTest {
     fun `a bound game blocks manual apply without any writes`() = runTest {
         for (autoTdp in listOf(false, true)) {
             ownership.owner = ClockOwner.BoundGame(autoTdp)
-            val outcome = tuning.writeCapsReassertingGpu(policies) {
+            val outcome = tuning.writeCapsPreservingControls(policies) {
                 caps.applyCaps(policies, emptyMap(), false, false)
             }
             assertEquals(TuningOutcome.Blocked, outcome)
@@ -190,7 +190,7 @@ class GlobalTuningTest {
     fun `manual apply releases global AutoTDP before writing and restoring the floor`() = runTest {
         ownership.owner = ClockOwner.GlobalAutoTdp
         store.state = TuningState(PowerTier.CUSTOM, SideControlState.CLEARED.copy(gpuFloorPercent = 75))
-        val outcome = tuning.writeCapsReassertingGpu(policies) {
+        val outcome = tuning.writeCapsPreservingControls(policies) {
             caps.applyCaps(policies, emptyMap(), false, false)
         }
         assertTrue(outcome is TuningOutcome.Applied)
@@ -300,7 +300,7 @@ class GlobalTuningTest {
         repeat(2) {
             shell.commands.clear()
             events.clear()
-            tuning.writeCapsReassertingGpu(policies) {
+            tuning.writeCapsPreservingControls(policies) {
                 caps.applyCaps(policies, mapOf(gpu.id to 500_000), false, false)
             }
             assertTrue(shell.wrote("min_pwrlevel", "echo 1"))
@@ -312,14 +312,14 @@ class GlobalTuningTest {
     @Test
     fun `leaving a bound app restores the global floor after restoring caps`() = runTest {
         store.state = TuningState(PowerTier.CUSTOM, SideControlState.CLEARED.copy(gpuFloorPercent = 75))
-        tuning.writeCapsReassertingGpu(policies, gpuFloorPercent = 0) {
+        tuning.writeCapsPreservingControls(policies, gpuFloorPercent = 0) {
             caps.applyCaps(policies, mapOf(gpu.id to 500_000), false, false)
         }
         assertTrue(shell.wrote("min_pwrlevel", "echo 2"))
         shell.commands.clear()
         events.clear()
 
-        tuning.writeCapsReassertingGpu(policies) {
+        tuning.writeCapsPreservingControls(policies) {
             caps.applyCaps(policies, mapOf(gpu.id to 800_000), false, false)
         }
 
@@ -334,7 +334,7 @@ class GlobalTuningTest {
         val global = SideControlState.CLEARED.copy(gpuLocked = true)
         store.state = TuningState(PowerTier.CUSTOM, global)
 
-        tuning.writeCapsReassertingGpu(policies, gpuFloorPercent = 75) {
+        tuning.writeCapsPreservingControls(policies, gpuFloorPercent = 75) {
             caps.applyCaps(policies, mapOf(gpu.id to 500_000), false, false)
         }
 
@@ -357,11 +357,11 @@ class GlobalTuningTest {
     fun `cap writes from outside the locks enter clock ownership but holders of it do not re-enter`() = runTest {
         store.state = TuningState(PowerTier.CUSTOM, SideControlState.CLEARED.copy(gpuFloorPercent = 75))
 
-        tuning.writeCapsReassertingGpu(policies) { caps.applyCaps(policies, emptyMap(), false, false) }
+        tuning.writeCapsPreservingControls(policies) { caps.applyCaps(policies, emptyMap(), false, false) }
         assertEquals(1, ownership.entries)
         assertTrue(shell.wrote("min_pwrlevel", "echo 1"))
 
-        tuning.writeCapsReassertingGpuUnderOwnership(policies) {}
+        tuning.writeCapsPreservingControlsUnderOwnership(policies) {}
         assertEquals(1, ownership.entries)
     }
 
@@ -369,7 +369,7 @@ class GlobalTuningTest {
     fun `a binding GPU floor cannot exceed its cap`() = runTest {
         shell.gpuCapLevel = 2
 
-        tuning.writeCapsReassertingGpu(policies, gpuFloorPercent = 75) {
+        tuning.writeCapsPreservingControls(policies, gpuFloorPercent = 75) {
             caps.applyCaps(policies, mapOf(gpu.id to 200_000), false, false)
         }
 
@@ -397,14 +397,19 @@ class GlobalTuningTest {
             commands += command
             events += "shell"
             return when {
+                command.startsWith("CPU_STATE=") -> com.kei.pulse.root.CpuClockProtection.SUCCESS
                 command.contains("scaling_available_governors") -> "walt performance powersave"
                 command.startsWith("cat") && command.contains("pwrlevel") -> gpuCapLevel.toString()
                 else -> null
             }
         }
 
-        fun wrote(node: String, write: String): Boolean =
-            commands.any { cmd -> cmd.split("; ").any { it.contains(write) && it.contains(node) } }
+        fun wrote(node: String, write: String): Boolean = commands.any { cmd ->
+            cmd.split("; ", "\n").any {
+                it.contains(node) && (it.contains(write) ||
+                    it.startsWith("cpu_write ") && it.contains(" ${write.removePrefix("echo ")} "))
+            }
+        }
     }
 
     private class InMemoryTuningStore : TuningStore {
