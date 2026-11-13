@@ -57,16 +57,10 @@ class FanController {
         // same direction it already cached. Bounce through a different real mode first to
         // force a reload, then set the target. Reaching Smart bounces through SILENT (low),
         // never SPORT (high), so restoring Smart on game-exit dips quietly instead of revving.
-        val bounce = bounceModeFor(mode)
-        RootSupport.runRootCommand(
-            "settings put system fan_mode $bounce; " +
-                "settings put system fan_mode $mode; " +
-                "settings put system is_quick_set_performance_and_fan_enable 1; " +
-                "settings get system fan_mode",
-        )
+        RootSupport.runRootCommand(vendorModeCommand(mode))
         val readBack = RootSupport.runRootCommand("settings get system fan_mode")
             ?.trim()?.toIntOrNull()
-        android.util.Log.d("PulseFan", "setMode($mode) bounce=$bounce readBack=$readBack ok=${readBack == mode}")
+        android.util.Log.d("PulseFan", "setMode($mode) bounce=${bounceModeFor(mode)} readBack=$readBack ok=${readBack == mode}")
         return readBack == mode
     }
 
@@ -84,6 +78,12 @@ class FanController {
          * — e.g. when AutoTDP restores it on game-exit — dips quietly instead of audibly revving the fan.
          */
         fun bounceModeFor(target: Int): Int = if (target == SMART) SILENT else SMART
+
+        internal fun vendorModeCommand(mode: Int): String =
+            "settings put system fan_mode ${bounceModeFor(mode)}; " +
+                "settings put system fan_mode $mode; " +
+                "settings put system is_quick_set_performance_and_fan_enable 1; " +
+                "settings get system fan_mode"
 
         /**
          * PULSE-driven custom fan curve (Odin 3 only). Not a stock fan_mode — when selected, the service
