@@ -137,6 +137,7 @@ class GlobalTuningTest {
 
         assertEquals(TuningOutcome.Deferred, outcome)
         assertTrue(caps.calls.isEmpty())
+        assertTrue(shell.commands.isEmpty())
         assertEquals(69, store.state.sideControls.powerTargetPercent)
     }
 
@@ -180,6 +181,86 @@ class GlobalTuningTest {
         checkedTuning.edit(SideControlEdit.Governor(GovernorController.OPTIONS.first()))
         assertTrue(shell.commands.isNotEmpty())
     }
+    @Test
+    fun `Power Target slider and switch reassert the global GPU floor after caps`() = runTest {
+        store.state = TuningState(PowerTier.CUSTOM, SideControlState.CLEARED.copy(gpuFloorPercent = 75))
+
+        for (edit in listOf(
+            SideControlEdit.PowerTarget(true, 65),
+            SideControlEdit.PowerTarget(true, 65),
+            SideControlEdit.PowerTargetCpuOnly(true),
+        )) {
+            shell.commands.clear()
+            events.clear()
+            tuning.edit(edit)
+            assertTrue(shell.wrote("min_pwrlevel", "echo 1"))
+            assertEquals("caps", events.first())
+            assertEquals("shell", events.last())
+        }
+    }
+
+    @Test
+    fun `binding apply and periodic reapply inherit the global GPU floor`() = runTest {
+        store.state = TuningState(PowerTier.CUSTOM, SideControlState.CLEARED.copy(gpuFloorPercent = 75))
+
+        repeat(2) {
+            shell.commands.clear()
+            events.clear()
+            tuning.applyBindingCaps(policies) {
+                caps.applyCaps(policies, mapOf(gpu.id to 500_000), false, false)
+            }
+            assertTrue(shell.wrote("min_pwrlevel", "echo 1"))
+            assertEquals("caps", events.first())
+            assertEquals("shell", events.last())
+        }
+    }
+
+    @Test
+    fun `leaving a bound app restores the global floor after restoring caps`() = runTest {
+        store.state = TuningState(PowerTier.CUSTOM, SideControlState.CLEARED.copy(gpuFloorPercent = 75))
+        tuning.applyBindingCaps(policies, gpuFloorPercent = 0) {
+            caps.applyCaps(policies, mapOf(gpu.id to 500_000), false, false)
+        }
+        assertTrue(shell.wrote("min_pwrlevel", "echo 2"))
+        shell.commands.clear()
+        events.clear()
+
+        tuning.applyBindingCaps(policies) {
+            caps.applyCaps(policies, mapOf(gpu.id to 800_000), false, false)
+        }
+
+        assertTrue(shell.wrote("min_pwrlevel", "echo 1"))
+        assertEquals("caps", events.first())
+        assertEquals("shell", events.last())
+        assertEquals(75, store.state.sideControls.gpuFloorPercent)
+    }
+
+    @Test
+    fun `a binding floor overrides the global GPU lock without changing global state`() = runTest {
+        val global = SideControlState.CLEARED.copy(gpuLocked = true)
+        store.state = TuningState(PowerTier.CUSTOM, global)
+
+        tuning.applyBindingCaps(policies, gpuFloorPercent = 75) {
+            caps.applyCaps(policies, mapOf(gpu.id to 500_000), false, false)
+        }
+
+        assertTrue(shell.wrote("min_pwrlevel", "echo 1"))
+        assertFalse(shell.wrote("max_pwrlevel", "echo"))
+        assertEquals(global, store.state.sideControls)
+    }
+
+    @Test
+    fun `a binding GPU floor cannot exceed its cap`() = runTest {
+        shell.gpuCapLevel = 2
+
+        tuning.applyBindingCaps(policies, gpuFloorPercent = 75) {
+            caps.applyCaps(policies, mapOf(gpu.id to 200_000), false, false)
+        }
+
+        assertTrue(shell.wrote("min_pwrlevel", "echo 2"))
+        assertFalse(shell.wrote("min_pwrlevel", "echo 1"))
+    }
+
     private fun policy(id: Int, freqs: List<Int>, path: String = "/sys/devices/system/cpu/cpufreq/policy$id") =
         CpuPolicyInfo(
             id = id,
@@ -194,13 +275,14 @@ class GlobalTuningTest {
 
     private class FakeShell(private val events: MutableList<String>) : PrivilegedShell {
         val commands = mutableListOf<String>()
+        var gpuCapLevel = 0
 
         override fun run(command: String): String? {
             commands += command
             events += "shell"
             return when {
                 command.contains("scaling_available_governors") -> "walt performance powersave"
-                command.startsWith("cat") && command.contains("pwrlevel") -> "2"
+                command.startsWith("cat") && command.contains("pwrlevel") -> gpuCapLevel.toString()
                 else -> null
             }
         }

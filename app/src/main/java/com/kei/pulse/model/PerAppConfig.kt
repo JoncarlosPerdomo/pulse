@@ -18,6 +18,7 @@ data class PerAppConfig(
     val profileBinding: String? = null,
     val fanMode: Int? = null,
     val refreshRateHz: Int? = null,
+    val gpuFloorPercent: Int? = null,
     /**
      * AutoTDP frame-rate target (fps) for this app: clocks are trimmed to hold this rate. `0` = Max
      * (uncapped — only thermal trims); `null` = inherit the global default. Only used when
@@ -44,7 +45,7 @@ data class PerAppConfig(
     val measuredAvgW: Float = 0f,
 ) {
     val hasAnyBinding: Boolean
-        get() = profileBinding != null || fanMode != null || refreshRateHz != null
+        get() = profileBinding != null || fanMode != null || refreshRateHz != null || gpuFloorPercent != null
 
     /**
      * Fold one live battery-draw sample (W) into the measured peak/avg, returning the updated config.

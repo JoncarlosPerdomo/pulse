@@ -4,8 +4,19 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 class PerAppConfigTest {
+
+    @Test
+    fun `GPU floor binding round trips and old configs inherit the global floor`() {
+        val config = PerAppConfig("game", gpuFloorPercent = 75)
+        assertTrue(config.hasAnyBinding)
+        assertEquals(config, Json.decodeFromString<PerAppConfig>(Json.encodeToString(config)))
+        assertEquals(null, Json.decodeFromString<PerAppConfig>("""{"packageName":"game"}""").gpuFloorPercent)
+        assertTrue(PerAppConfig("game", gpuFloorPercent = 0).hasAnyBinding)
+    }
 
     @Test
     fun `useGameModeCap only for Odin targets that evenly divide the panel max refresh`() {
