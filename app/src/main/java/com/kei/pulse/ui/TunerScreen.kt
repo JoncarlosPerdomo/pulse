@@ -69,6 +69,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.kei.pulse.data.GlobalTuning.Companion.gpuFloorMhz
 import com.kei.pulse.data.DisplayController
 import com.kei.pulse.data.GovernorOption
 import com.kei.pulse.data.TelemetrySnapshot
@@ -88,6 +89,7 @@ private const val NEW_PROFILE_DIALOG_ID = "__new_profile__"
 @Composable
 fun MainTunerScreen(
     state: TunerState,
+    tuningReadback: TuningReadback,
     sleepProfileId: String?,
     onApplyProfile: (PerformanceProfile) -> Unit,
     onApplyCurrent: (TunerState) -> Unit,
@@ -140,6 +142,11 @@ fun MainTunerScreen(
     autoTdpBias: AutoTdpBias,
     onAutoTdpBiasChange: (AutoTdpBias) -> Unit,
 ) {
+    val gpu = state.policies.firstOrNull { it.isGpu }
+    val tierStatus = globalTuningStatus(
+        capsInForce(state.policies, tuningReadback.expectedCaps, state.actualValues),
+        tuningReadback.owner,
+    )
     var dialogProfileId by remember { mutableStateOf<String?>(null) }
 
     ScreenNotifications(
@@ -218,7 +225,12 @@ fun MainTunerScreen(
                     onBiasChange = onAutoTdpBiasChange,
                     showWattCaps = autoTdpShowWattCaps,
                 )
-                TierSelector(active = activeTier, onSelect = onSelectTier, enabled = !autoTdpEnabled)
+                TierSelector(
+                    active = activeTier,
+                    onSelect = onSelectTier,
+                    enabled = !autoTdpEnabled,
+                    appliedStatus = tierStatus,
+                )
 
                 if (activeTier == PowerTier.CUSTOM && !autoTdpEnabled) {
                     PowerTargetModule(
@@ -231,7 +243,7 @@ fun MainTunerScreen(
                     )
                 }
 
-                CurrentFrequenciesCard(state = state)
+                CurrentFrequenciesCard(state = state, gpuFloorMhz = gpuFloorMhz(gpu, tuningReadback.gpuMinLevel))
 
                 // AutoTDP manages the governor + clocks itself, but the fan stays user-configurable: a
                 // Custom fan set here keeps running (cascaded) during AutoTDP, otherwise Smart is used.
@@ -288,6 +300,10 @@ fun MainTunerScreen(
 
                     GpuFloorModule(
                         currentPercent = gpuFloorPercent,
+                        gpu = gpu,
+                        actualLevel = tuningReadback.gpuMinLevel,
+                        ceiling = tuningReadback.gpuMaxLevel,
+                        owner = tuningReadback.owner,
                         locked = gpuLocked,
                         onSelect = onSelectGpuFloor,
                         onToggleLock = onToggleGpuLock,
@@ -612,7 +628,7 @@ private fun PServerStatusChip(isLinked: Boolean) {
 
 /** Read-only live readout of each cluster's active clock. The sliders below are what change them. */
 @Composable
-private fun CurrentFrequenciesCard(state: TunerState) {
+private fun CurrentFrequenciesCard(state: TunerState, gpuFloorMhz: Int?) {
     SectionCard(
         title = null,
         containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
@@ -638,6 +654,11 @@ private fun CurrentFrequenciesCard(state: TunerState) {
                     modifier = Modifier.weight(1f),
                 )
             }
+            Text(
+                text = gpuFloorMhz?.let { "GPU floor: $it MHz" } ?: "GPU floor: Unverified",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 8.dp),
+            )
         }
     }
 }

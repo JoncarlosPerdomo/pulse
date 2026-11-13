@@ -29,6 +29,7 @@ import kotlinx.coroutines.flow.flowOf
 import com.kei.pulse.model.AppColorSource
 import com.kei.pulse.model.AppSettings
 import com.kei.pulse.model.AutoTdpBias
+import com.kei.pulse.model.ClockOwner
 import com.kei.pulse.model.CpuPolicyInfo
 import com.kei.pulse.model.PerformanceProfile
 import com.kei.pulse.model.PowerTier
@@ -512,8 +513,17 @@ class TunerViewModel(
         }
     }
 
+    private val _tuningReadback = MutableStateFlow(TuningReadback())
+    val tuningReadback: StateFlow<TuningReadback> = _tuningReadback
+
     suspend fun readTelemetry(): TelemetrySnapshot {
         val snap = withContext(Dispatchers.IO) { telemetryReader.read(state.value.policies) }
+        _tuningReadback.value = TuningReadback(
+            expectedCaps = globalTuning.expectedCaps(state.value.policies),
+            gpuMinLevel = snap.gpuMinLevel,
+            gpuMaxLevel = snap.gpuMaxLevel,
+            owner = globalTuning.clockOwner(),
+        )
         updatePeakCalibration(snap)
         return snap
     }
@@ -1024,3 +1034,10 @@ class TunerViewModel(
         }
     }
 }
+
+data class TuningReadback(
+    val expectedCaps: Map<Int, Int> = emptyMap(),
+    val gpuMinLevel: Int? = null,
+    val gpuMaxLevel: Int? = null,
+    val owner: ClockOwner = ClockOwner.Free,
+)

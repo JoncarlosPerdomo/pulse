@@ -74,6 +74,10 @@ import com.kei.pulse.model.FanCurveEditing
 import com.kei.pulse.model.FanGraphGeometry
 import com.kei.pulse.model.FanTempController
 import com.kei.pulse.model.PerAppConfig
+import com.kei.pulse.data.GlobalTuning.Companion.gpuFloorLevelFor
+import com.kei.pulse.data.GlobalTuning.Companion.gpuFloorMhz
+import com.kei.pulse.model.ClockOwner
+import com.kei.pulse.model.CpuPolicyInfo
 import com.kei.pulse.model.PowerTier
 import kotlin.math.hypot
 import kotlin.math.roundToInt
@@ -90,9 +94,10 @@ fun PulseSectionLabel(text: String, modifier: Modifier = Modifier) {
 
 /** The four performance tiers as the primary control: a 2x2 grid of selectable cards. */
 @Composable
-fun TierSelector(
+internal fun TierSelector(
     active: PowerTier,
     onSelect: (PowerTier) -> Unit,
+    appliedStatus: TuningInForce?,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
 ) {
@@ -109,6 +114,7 @@ fun TierSelector(
                     TierCard(
                         tier = tier,
                         selected = tier == active,
+                        appliedStatus = appliedStatus,
                         onClick = { if (enabled) onSelect(tier) },
                         modifier = Modifier.weight(1f),
                     )
@@ -122,6 +128,7 @@ fun TierSelector(
 private fun TierCard(
     tier: PowerTier,
     selected: Boolean,
+    appliedStatus: TuningInForce?,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -148,7 +155,7 @@ private fun TierCard(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = tier.tagline,
+                text = if (selected && appliedStatus != null) "${appliedStatus.label} - ${tier.tagline}" else tier.tagline,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -821,6 +828,10 @@ fun RefreshRateModule(current: Int?, onSelect: (Int) -> Unit, modifier: Modifier
 @Composable
 fun GpuFloorModule(
     currentPercent: Int,
+    gpu: CpuPolicyInfo?,
+    actualLevel: Int?,
+    ceiling: Int?,
+    owner: ClockOwner,
     locked: Boolean,
     onSelect: (Int) -> Unit,
     onToggleLock: (Boolean) -> Unit,
@@ -854,9 +865,10 @@ fun GpuFloorModule(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 options.forEach { pct ->
+                    val status = globalTuningStatus(gpuFloorInForce(gpu, pct, actualLevel, ceiling), owner)
                     PulseChip(
-                        label = if (pct == 0) "Off" else "$pct%",
-                        selected = currentPercent == pct,
+                        label = gpuFloorChipLabel(gpu, pct, status.takeIf { currentPercent == pct }),
+                        selected = currentPercent == pct && status == TuningInForce.Applied,
                         accent = MaterialTheme.colorScheme.tertiary,
                         onClick = { onSelect(pct) },
                     )
@@ -1131,4 +1143,11 @@ fun CpuFloorModule(currentPercent: Int, onSelect: (Int) -> Unit, modifier: Modif
             modifier = Modifier.padding(top = 8.dp, start = 4.dp, end = 4.dp),
         )
     }
+}
+
+internal fun gpuFloorChipLabel(gpu: CpuPolicyInfo?, percent: Int, status: TuningInForce?): String = buildString {
+    append(if (percent == 0) "Off" else "$percent%")
+    val mhz = gpuFloorMhz(gpu, gpu?.let { gpuFloorLevelFor(it, percent) })
+    append(mhz?.let { " - $it MHz" } ?: " - Unverified")
+    if (status != null) append(" - ${status.label}")
 }
