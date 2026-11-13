@@ -465,11 +465,11 @@ class CpuFloorController(private val shell: PrivilegedShell = PServerShell) {
     fun setFloor(policies: List<CpuPolicyInfo>, percent: Int): Boolean {
         val cpu = policies.filterNot { it.isGpu }
         if (cpu.isEmpty()) return false
-        // Clearing the floor resets every cluster (incl. prime) to its lowest OPP — unchanged behaviour.
         if (percent <= 0) {
             cpu.forEach { p ->
                 val path = "${p.policyPath}/scaling_min_freq"
-                shell.run("chmod 666 $path; echo ${p.minFreq} > $path; chmod 644 $path")
+                val lowest = p.supportedFrequencies.minOrNull() ?: p.minFreq
+                shell.run("chmod 666 $path; echo $lowest > $path; chmod 644 $path")
             }
             return true
         }

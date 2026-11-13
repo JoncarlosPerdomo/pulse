@@ -56,7 +56,7 @@ class ThorPolicyWritesTest {
 
     @Test
     fun `floor reset writes every CPU policy within the inline limit`() {
-        assertTrue(CpuFloorController(shell).setFloor(cpu + gpu, 0))
+        assertTrue(CpuFloorController(shell).setFloor(cpu.map { it.copy(minFreq = 1_000_000) } + gpu, 0))
         assertWrites(cpu, "scaling_min_freq", "300000")
     }
 
