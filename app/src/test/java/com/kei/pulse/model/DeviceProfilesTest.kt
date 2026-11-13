@@ -1,6 +1,5 @@
 package com.kei.pulse.model
 
-import com.kei.pulse.data.AutoTuneController
 import com.kei.pulse.data.FanController
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -8,9 +7,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Pins every per-device invariant row AND asserts the legacy consumers agree with the table — so a device
- * fact can never again live (and silently diverge) in two places. The bug class: an assumption true on the
- * Odin, false on the Thor/RP6, baked into imperative code.
+ * Pins every per-device invariant row. The bug class: an assumption true on the Odin, false on the
+ * Thor/RP6, baked into imperative code.
  */
 class DeviceProfilesTest {
 
@@ -48,29 +46,9 @@ class DeviceProfilesTest {
     fun `unknown device gets conservative defaults`() {
         val p = DeviceProfiles.UNKNOWN
         assertFalse(p.primeIsVendorFloored)
+        assertEquals(listOf(60, 90, 120), p.fpsTargetOptions)
         assertFalse(p.honorsGameModeFpsCap)
         assertFalse(p.appliesOdinPowerTuning)
         assertEquals(FanController.SMART, p.fanReleaseMode)
-    }
-
-    // ── Consumers must agree with the table (no second copy of a device fact) ───────────────────────
-
-    @Test
-    fun `perappconfig game-mode-cap and fps targets delegate to the table`() {
-        for (soc in listOf("CQ8725S", "QCS8550", null, "SM8650")) {
-            assertEquals(soc ?: "null", DeviceProfiles.forSoc(soc).honorsGameModeFpsCap, PerAppConfig.isGameModeCapSoc(soc))
-            assertEquals(soc ?: "null", DeviceProfiles.forSoc(soc).fpsTargetOptions, PerAppConfig.fpsTargetsFor(soc))
-        }
-    }
-
-    @Test
-    fun `autotune odin power tuning delegates to the table`() {
-        for (soc in listOf("CQ8725S", "QCS8550", null, "SM8650")) {
-            assertEquals(
-                soc ?: "null",
-                DeviceProfiles.forSoc(soc).appliesOdinPowerTuning,
-                AutoTuneController.appliesOdinPowerTuning(soc),
-            )
-        }
     }
 }

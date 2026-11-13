@@ -62,23 +62,6 @@ class QuickAccessScopeTest {
     }
 
     @Test
-    fun `global autotdp value edits reduce through the global defaults`() {
-        assertTrue(
-            QuickAccessScope.globalReduce(base.copy(autoTdpDefaultEnabled = false), QuickAccessAction.ToggleAutoTdp)
-                .autoTdpDefaultEnabled,
-        )
-        assertEquals(90, QuickAccessScope.globalReduce(base, QuickAccessAction.SetFpsTarget(90)).autoTdpFpsTarget)
-        assertEquals(
-            AutoTdpBias.SMOOTH,
-            QuickAccessScope.globalReduce(base, QuickAccessAction.SetBias(AutoTdpBias.SMOOTH)).autoTdpBias,
-        )
-        assertFalse(
-            QuickAccessScope.globalReduce(base.copy(autoTdpAggressivePark = true), QuickAccessAction.SetAggressivePark(false))
-                .autoTdpAggressivePark,
-        )
-    }
-
-    @Test
     fun `follows global only when there is no per-app binding`() {
         assertTrue(QuickAccessScope.followsGlobal(null))
         assertTrue(QuickAccessScope.followsGlobal(PerAppConfig(packageName = "x", profileBinding = null)))

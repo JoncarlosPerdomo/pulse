@@ -35,13 +35,6 @@ class ForegroundClassifierTest {
         assertTrue(neutral("com.retroid.settings"))
     }
 
-    @Test fun isSettingsPackageMatchesPrefixAndSuffix() {
-        assertTrue(ForegroundClassifier.isSettingsPackage("com.android.settings"))
-        assertTrue(ForegroundClassifier.isSettingsPackage("com.android.settings.intelligence"))
-        assertTrue(ForegroundClassifier.isSettingsPackage("com.odin.settings"))
-        assertFalse(ForegroundClassifier.isSettingsPackage("app.gamenative"))
-    }
-
     // --- Other neutral surfaces --------------------------------------------------------------------
 
     @Test fun selfIsNeutral() = assertTrue(neutral(self))

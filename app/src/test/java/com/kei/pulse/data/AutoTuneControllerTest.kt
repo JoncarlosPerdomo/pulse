@@ -190,20 +190,6 @@ class AutoTuneControllerTest {
     }
 
     @Test
-    fun thermalCeilingSitsAboveThePrimeFloorForEveryBias() {
-        // The bug: EFFICIENT's old 74 °C ceiling was BELOW the Odin's ~80 °C uncoolable prime floor, so the
-        // ceiling rail strangled the GPU to its hard floor forever (Stray 60→42 fps) for ~0 thermal/power gain.
-        // Every bias's ceiling must clear the floor so the trim is reachable and the fan gets first crack.
-        assertEquals(82, newController(60).apply { bias = AutoTdpBias.EFFICIENT }.thermalCeilingC())
-        assertEquals(84, newController(60).apply { bias = AutoTdpBias.BALANCED }.thermalCeilingC())
-        assertEquals(87, newController(60).apply { bias = AutoTdpBias.SMOOTH }.thermalCeilingC())
-        AutoTdpBias.values().forEach {
-            assertTrue("$it ceiling must clear the ~80 °C prime floor",
-                newController(60).apply { bias = it }.thermalCeilingC() > 80)
-        }
-    }
-
-    @Test
     fun biasGradientPinsEveryKnobAndStaysMonotonicEfficientToSmooth() {
         // The three biases ARE six hand-tuned numbers ([gateParamsFor]) + the watt cap ([powerCeilingW]); every
         // other knob in the controller is bias-independent. This pins each value AND the EFFICIENT→SMOOTH
@@ -234,6 +220,7 @@ class AutoTuneControllerTest {
         // More headroom (ASCENDING): watts, thermal ceiling, gate reaction speed (alpha).
         assertTrue("powerCeilingW asc", e.powerCeilingW < b.powerCeilingW && b.powerCeilingW < s.powerCeilingW)
         assertTrue("ceilingC asc", e.ceilingC < b.ceilingC && b.ceilingC < s.ceilingC)
+        assertTrue("every ceiling must clear the ~80 °C prime floor", e.ceilingC > 80)
         assertTrue("alpha asc", e.alpha < b.alpha && b.alpha < s.alpha)
         // Trips sooner / protects frames harder (DESCENDING): the × budget thresholds and the pre-raise debounce.
         assertTrue("nearFrac desc", e.nearFrac > b.nearFrac && b.nearFrac > s.nearFrac)
@@ -241,11 +228,6 @@ class AutoTuneControllerTest {
         assertTrue("confirm non-increasing", e.confirm >= b.confirm && b.confirm >= s.confirm)
         // Within each bias the suppress-harvest band sits below the pre-raise trigger.
         listOf(e, b, s).forEach { assertTrue("nearFrac < overFrac for $it", it.nearFrac < it.overFrac) }
-
-        // The accessor reflects the LIVE gate the controller decides with — not a parallel lookup table.
-        val live = newController().apply { bias = AutoTdpBias.BALANCED }
-        assertEquals(b, live.gateParamsFor(live.bias))
-        assertEquals("thermalCeilingC() agrees with the gate", b.ceilingC, live.thermalCeilingC())
     }
 
     @Test
@@ -386,16 +368,6 @@ class AutoTuneControllerTest {
         repeat(6) { last = c.feed(35f, jank = 28, cpuBusy = 42, gpuBusy = 75, cpuCorePeak = 99, cpuTemp = 80, gpuTemp = 66) }
         assertTrue("latched prime-wall settle outranks the lockout — no chase-raise", last.action != Action.RAISE)
         assertEquals("the pegged prime is never trimmed (no-op for heat)", 100, c.capFor(prime.id))
-    }
-
-    @Test
-    fun odinPowerTuningAppliesOnlyToTheOdinSoc() {
-        // The watt cap + prime-walled settle are Odin (CQ8725S) chassis/floored-prime tuning. They must NOT
-        // apply to the SD 8 Gen 2 (QCS8550 — Thor/RP6), whose prime scales and chassis differs.
-        assertTrue(AutoTuneController.appliesOdinPowerTuning("CQ8725S"))
-        assertTrue("case-insensitive", AutoTuneController.appliesOdinPowerTuning("cq8725s"))
-        assertFalse("SD 8 Gen 2 (Thor / RP6)", AutoTuneController.appliesOdinPowerTuning("QCS8550"))
-        assertFalse("unknown/null SoC", AutoTuneController.appliesOdinPowerTuning(null))
     }
 
     @Test

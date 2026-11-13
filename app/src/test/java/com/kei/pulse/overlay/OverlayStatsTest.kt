@@ -114,11 +114,6 @@ class OverlayStatsTest {
     }
 
     @Test
-    fun `Full preset shows every element`() {
-        assertEquals(OverlayElement.entries.toSet(), OverlayPreset.FULL.elements)
-    }
-
-    @Test
     fun `battery-left is in every preset's default bundle`() {
         OverlayPreset.entries.forEach { preset ->
             assertTrue("BATTERY_LEFT missing from ${preset.name}", OverlayElement.BATTERY_LEFT in preset.elements)

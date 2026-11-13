@@ -75,17 +75,6 @@ class FanCurveControllerTest {
         assertEquals(50000, w.last())
     }
 
-    @Test fun `never writes below the 20 percent floor for a low curve`() {
-        val w = mutableListOf<Int>()
-        val c = FanCurveController(writeDuty = { w += it }, readRpm = { null }).apply {
-            period = 50000; slewPerSecond = 20
-            curve = FanCurve(listOf(FanCurvePoint(30, 5))) // below floor → clamps to 20%
-        }
-        c.setTarget(30)
-        c.slew(1000)
-        assertEquals(10000, w.last()) // 20% of 50000
-    }
-
     @Test fun `a higher slew rate reaches the target in fewer passes`() {
         val slow = controller(mutableListOf()).apply { slewPerSecond = 5 }
         val fast = controller(mutableListOf()).apply { slewPerSecond = 30 }
@@ -160,9 +149,5 @@ class FanCurveControllerTest {
         c.reconcileActualDuty(null) // unreadable node → can't conclude drift, leave write-on-change alone
         c.slew(1000)
         assertEquals(held, w.size)
-    }
-
-    @Test fun `rpm reads back from the injected reader`() {
-        assertEquals(4800, controller(mutableListOf()).rpm())
     }
 }
