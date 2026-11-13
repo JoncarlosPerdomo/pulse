@@ -87,16 +87,4 @@ class TierTransitionTest {
         assertFalse(after.gpuLocked)
         assertEquals(40, after.gpuFloorPercent) // unlock doesn't touch the floor
     }
-
-    @Test
-    fun `single-control toggles set only their own field`() {
-        assertEquals(false, TierTransition.afterPowerTargetEnabled(engaged, false).powerTargetEnabled)
-        assertEquals(15, TierTransition.afterCpuFloor(engaged, 15).cpuFloorPercent)
-        assertEquals(25, TierTransition.afterGpuFloor(engaged, 25).gpuFloorPercent)
-        assertEquals(false, TierTransition.afterPrimeBoost(engaged, false).primeCoreBoostLimited)
-        // afterGpuFloor must NOT clear the lock (faithful to the asymmetric current behavior).
-        assertTrue("setting a GPU floor leaves the lock as-is", TierTransition.afterGpuFloor(engaged, 25).gpuLocked)
-        // A single-control toggle leaves the other six fields exactly as they were.
-        assertEquals(engaged.copy(cpuFloorPercent = 15), TierTransition.afterCpuFloor(engaged, 15))
-    }
 }

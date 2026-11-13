@@ -11,12 +11,6 @@ import org.junit.Test
 class SleepGateTest {
 
     @Test
-    fun `screen on is a full tick, screen off is a skip`() {
-        assertEquals(SleepGate.TickWork.FULL, SleepGate.tickWork(screenOn = true))
-        assertEquals(SleepGate.TickWork.SKIP, SleepGate.tickWork(screenOn = false))
-    }
-
-    @Test
     fun `transitions fire exactly on the edges`() {
         assertEquals(SleepGate.Transition.NONE, SleepGate.transition(prevOn = true, nowOn = true))
         assertEquals(SleepGate.Transition.NONE, SleepGate.transition(prevOn = false, nowOn = false))

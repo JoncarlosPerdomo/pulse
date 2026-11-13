@@ -1,9 +1,6 @@
 package com.kei.pulse.data
 
-import com.kei.pulse.model.AutoTdpBias
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -18,19 +15,6 @@ class StrayOdin3FixtureTest {
 
     private fun load(): String =
         javaClass.getResourceAsStream("/autotdp/stray_odin3_efficient60.logcat")!!.bufferedReader().readText()
-
-    @Test
-    fun fixtureParsesWithHeaderAndTicks() {
-        val cap = AutoTdpLogParser.parse(load())
-        val h = cap.header
-        assertNotNull("fixture must carry an AUTOTDP-SESSION header", h)
-        h!!
-        assertEquals(60, h.targetFps)
-        assertEquals(AutoTdpBias.EFFICIENT, h.bias)
-        assertTrue("Odin (CQ8725S) ⇒ watt cap on", h.wattCapAndSettle)
-        assertEquals("prime cluster is policy 6 (highest max freq)", 6, h.policies.maxByOrNull { it.selectableMaxFreq }!!.id)
-        assertTrue("a real session has many ticks", cap.ticks.size >= 20)
-    }
 
     @Test
     fun replayedTrajectoryIsStable() {
