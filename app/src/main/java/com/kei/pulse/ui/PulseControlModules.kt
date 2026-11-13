@@ -74,6 +74,7 @@ import com.kei.pulse.model.FanCurveEditing
 import com.kei.pulse.model.FanGraphGeometry
 import com.kei.pulse.model.FanTempController
 import com.kei.pulse.model.PerAppConfig
+import com.kei.pulse.model.CpuPolicyInfo
 import com.kei.pulse.model.PowerTier
 import kotlin.math.hypot
 import kotlin.math.roundToInt
@@ -93,6 +94,7 @@ fun PulseSectionLabel(text: String, modifier: Modifier = Modifier) {
 fun TierSelector(
     active: PowerTier,
     onSelect: (PowerTier) -> Unit,
+    appliedStatus: String,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
 ) {
@@ -109,6 +111,7 @@ fun TierSelector(
                     TierCard(
                         tier = tier,
                         selected = tier == active,
+                        appliedStatus = appliedStatus,
                         onClick = { if (enabled) onSelect(tier) },
                         modifier = Modifier.weight(1f),
                     )
@@ -122,6 +125,7 @@ fun TierSelector(
 private fun TierCard(
     tier: PowerTier,
     selected: Boolean,
+    appliedStatus: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -148,7 +152,7 @@ private fun TierCard(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = tier.tagline,
+                text = if (selected) "$appliedStatus - ${tier.tagline}" else tier.tagline,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -821,6 +825,8 @@ fun RefreshRateModule(current: Int?, onSelect: (Int) -> Unit, modifier: Modifier
 @Composable
 fun GpuFloorModule(
     currentPercent: Int,
+    gpu: CpuPolicyInfo?,
+    actualLevel: Int?,
     locked: Boolean,
     onSelect: (Int) -> Unit,
     onToggleLock: (Boolean) -> Unit,
@@ -855,8 +861,16 @@ fun GpuFloorModule(
             ) {
                 options.forEach { pct ->
                     PulseChip(
-                        label = if (pct == 0) "Off" else "$pct%",
-                        selected = currentPercent == pct,
+                        label = buildString {
+                            append(if (pct == 0) "Off" else "$pct%")
+                            val mhz = gpuFloorMhz(gpu, gpuFloorLevel(gpu, pct))
+                            append(mhz?.let { " - $it MHz" } ?: " - Unverified")
+                            if (currentPercent == pct) {
+                                append(" - ${gpuFloorInForce(gpu, pct, actualLevel).statusLabel()}")
+                            }
+                        },
+                        selected = currentPercent == pct &&
+                            gpuFloorInForce(gpu, pct, actualLevel) == TuningInForce.Applied,
                         accent = MaterialTheme.colorScheme.tertiary,
                         onClick = { onSelect(pct) },
                     )

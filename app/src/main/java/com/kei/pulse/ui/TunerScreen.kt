@@ -69,6 +69,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.kei.pulse.data.GlobalTuning
+import com.kei.pulse.model.PowerTargetMath
 import com.kei.pulse.data.DisplayController
 import com.kei.pulse.data.GovernorOption
 import com.kei.pulse.data.TelemetrySnapshot
@@ -140,6 +142,22 @@ fun MainTunerScreen(
     autoTdpBias: AutoTdpBias,
     onAutoTdpBiasChange: (AutoTdpBias) -> Unit,
 ) {
+    var gpuMinLevel by remember { mutableStateOf<Int?>(null) }
+    val gpu = state.policies.firstOrNull { it.isGpu }
+    val expectedCaps = when {
+        activeTier != PowerTier.CUSTOM -> GlobalTuning.tierFrequencies(activeTier, state.policies)
+        powerTargetEnabled -> PowerTargetMath.capsForPercent(state.policies, powerTargetPercent, powerTargetCpuOnly)
+        else -> state.currentValues
+    }.toMutableMap().apply {
+        if (primeCoreBoostLimited && !powerTargetEnabled) {
+            state.policies.filterNot { it.isGpu }.maxByOrNull { it.selectableMaxFreq }?.let { prime ->
+                prime.supportedFrequencies.getOrNull(prime.supportedFrequencies.size - 2)?.let {
+                    put(prime.id, it)
+                }
+            }
+        }
+    }
+    val tierStatus = capsInForce(state.policies, expectedCaps, state.actualValues)
     var dialogProfileId by remember { mutableStateOf<String?>(null) }
 
     ScreenNotifications(
@@ -182,7 +200,9 @@ fun MainTunerScreen(
                 )
             } else {
                 TelemetryHud(
-                    readTelemetry = readTelemetry,
+                    readTelemetry = {
+                        readTelemetry().also { gpuMinLevel = it.gpuMinLevel }
+                    },
                     estimatedPeakW = estimatedPeakW,
                 )
 
@@ -218,7 +238,12 @@ fun MainTunerScreen(
                     onBiasChange = onAutoTdpBiasChange,
                     showWattCaps = autoTdpShowWattCaps,
                 )
-                TierSelector(active = activeTier, onSelect = onSelectTier, enabled = !autoTdpEnabled)
+                TierSelector(
+                    active = activeTier,
+                    onSelect = onSelectTier,
+                    enabled = !autoTdpEnabled,
+                    appliedStatus = tierStatus.statusLabel(),
+                )
 
                 if (activeTier == PowerTier.CUSTOM && !autoTdpEnabled) {
                     PowerTargetModule(
@@ -231,7 +256,7 @@ fun MainTunerScreen(
                     )
                 }
 
-                CurrentFrequenciesCard(state = state)
+                CurrentFrequenciesCard(state = state, gpuFloorMhz = gpuFloorMhz(gpu, gpuMinLevel))
 
                 // AutoTDP manages the governor + clocks itself, but the fan stays user-configurable: a
                 // Custom fan set here keeps running (cascaded) during AutoTDP, otherwise Smart is used.
@@ -288,6 +313,8 @@ fun MainTunerScreen(
 
                     GpuFloorModule(
                         currentPercent = gpuFloorPercent,
+                        gpu = gpu,
+                        actualLevel = gpuMinLevel,
                         locked = gpuLocked,
                         onSelect = onSelectGpuFloor,
                         onToggleLock = onToggleGpuLock,
@@ -612,7 +639,7 @@ private fun PServerStatusChip(isLinked: Boolean) {
 
 /** Read-only live readout of each cluster's active clock. The sliders below are what change them. */
 @Composable
-private fun CurrentFrequenciesCard(state: TunerState) {
+private fun CurrentFrequenciesCard(state: TunerState, gpuFloorMhz: Int?) {
     SectionCard(
         title = null,
         containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
@@ -638,6 +665,11 @@ private fun CurrentFrequenciesCard(state: TunerState) {
                     modifier = Modifier.weight(1f),
                 )
             }
+            Text(
+                text = gpuFloorMhz?.let { "GPU floor: $it MHz" } ?: "GPU floor: Unverified",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 8.dp),
+            )
         }
     }
 }
