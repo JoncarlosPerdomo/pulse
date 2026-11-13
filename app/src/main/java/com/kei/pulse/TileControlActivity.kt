@@ -12,6 +12,7 @@ import androidx.compose.material3.Surface
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.kei.pulse.data.TelemetryReader
+import com.kei.pulse.data.TuningOutcome
 import com.kei.pulse.model.ProfileStateResolver
 import com.kei.pulse.model.TunerState
 import com.kei.pulse.tile.QuickSettingsTileRefresher
@@ -85,30 +86,33 @@ class TileControlActivity : ComponentActivity() {
     private fun applyCurrentFromDialog(state: TunerState) {
         lifecycleScope.launch {
             val appliedProfile = ProfileStateResolver.preferredProfileForCurrentValues(state)
-            val result = container.repository.applyValues(
-                policies = state.policies,
-                selectedValues = state.currentValues,
-                isReset = appliedProfile?.id == ProfileStateResolver.STOCK_PROFILE_ID,
-                appliedDisplayProfileId = appliedProfile?.id ?: ProfileStateResolver.MANUAL_PROFILE_ID,
-            )
-            result.onSuccess {
-                container.repository.selectProfile(
-                    appliedProfile?.id?.takeUnless { id -> id == ProfileStateResolver.STOCK_PROFILE_ID },
+            val result = container.globalTuning.writeCapsReassertingGpu(state.policies) {
+                container.repository.applyValues(
+                    policies = state.policies,
+                    selectedValues = state.currentValues,
+                    isReset = appliedProfile?.id == ProfileStateResolver.STOCK_PROFILE_ID,
+                    appliedDisplayProfileId = appliedProfile?.id ?: ProfileStateResolver.MANUAL_PROFILE_ID,
                 )
-                Toast.makeText(
-                    applicationContext,
-                    "Applied ${appliedProfile?.name ?: "Manual"}",
-                    Toast.LENGTH_SHORT,
-                ).show()
-                dismissTileDialog()
-                QuickSettingsTileRefresher.requestUpdate(applicationContext)
-            }.onFailure { throwable ->
-                Toast.makeText(
-                    applicationContext,
-                    throwable.message ?: "Failed to apply limits",
-                    Toast.LENGTH_LONG,
-                ).show()
             }
+            if (result !is TuningOutcome.Applied) {
+                val message = when (result) {
+                    TuningOutcome.Blocked -> "A game owns the clocks. Limits not applied"
+                    is TuningOutcome.Failed -> result.message ?: "Failed to apply limits"
+                    else -> "Failed to apply limits"
+                }
+                Toast.makeText(applicationContext, message, Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            container.repository.selectProfile(
+                appliedProfile?.id?.takeUnless { id -> id == ProfileStateResolver.STOCK_PROFILE_ID },
+            )
+            Toast.makeText(
+                applicationContext,
+                "Applied ${appliedProfile?.name ?: "Manual"}",
+                Toast.LENGTH_SHORT,
+            ).show()
+            dismissTileDialog()
+            QuickSettingsTileRefresher.requestUpdate(applicationContext)
         }
     }
 

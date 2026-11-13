@@ -37,6 +37,12 @@ class TuningInForceTest {
     }
 
     @Test
+    fun `a vendor ceiling above the top OPP satisfies an uncapped target but not a lower cap`() {
+        assertEquals(TuningInForce.Applied, capsInForce(listOf(cpu), mapOf(0 to 2000000), mapOf(0 to 2100000)))
+        assertEquals(TuningInForce.NotApplied, capsInForce(listOf(cpu), mapOf(0 to 1400000), mapOf(0 to 2100000)))
+    }
+
+    @Test
     fun `both equally near OPPs match a midpoint request`() {
         for (live in listOf(1000000, 1400000)) {
             assertEquals(TuningInForce.Applied, capsInForce(listOf(cpu), mapOf(0 to 1200000), mapOf(0 to live)))

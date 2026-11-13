@@ -19,6 +19,16 @@ class PerAppConfigTest {
     }
 
     @Test
+    fun `an AutoTDP-off binding engages only with a fan, refresh rate or GPU floor extra`() {
+        val off = PerAppConfig("game", profileBinding = PerAppConfig.AUTO_OFF_BINDING)
+        assertFalse(off.engages)
+        assertTrue(off.copy(fanMode = 4).engages)
+        assertTrue(off.copy(refreshRateHz = 60).engages)
+        assertTrue(off.copy(gpuFloorPercent = 0).engages)
+        assertTrue(PerAppConfig("game").engages)
+    }
+
+    @Test
     fun `useGameModeCap only for Odin targets that evenly divide the panel max refresh`() {
         // The Game Mode cap only paces cleanly when the target divides 120; Android floors a non-divisor to
         // the nearest divisor (90 → 60), so 90 takes neither path and isn't offered on the Odin at all.

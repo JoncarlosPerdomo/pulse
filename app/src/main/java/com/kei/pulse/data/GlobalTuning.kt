@@ -52,10 +52,7 @@ sealed interface TuningOutcome {
     /** A side-control edit saved, but not written: AutoTDP owns the clocks. */
     data object Deferred : TuningOutcome
 
-    /**
-     * A Tier switch neither saved nor written: a bound game owns the clocks, and its exit restore would put back
-     * the pre-game Tier and caps anyway, leaving any saved side controls out of step with them.
-     */
+    /** A global cap apply or Tier switch was neither saved nor written because a bound game owns the clocks. */
     data object Blocked : TuningOutcome
 
     data class Failed(val reason: FailureReason, val message: String? = null) : TuningOutcome
@@ -174,7 +171,9 @@ class GlobalTuning(
                     }
                     is SideControlEdit.GpuFloor -> {
                         if (gpu == null) return@withOwnership TuningOutcome.Failed(FailureReason.NO_GPU)
-                        gpuFloor.setFloorLevel(gpu.policyPath, gpuFloorLevelFor(gpu, edit.percent))
+                        val level = gpuFloorLevel(gpu, edit.percent)
+                            ?: return@withOwnership TuningOutcome.Failed(FailureReason.WRITE_FAILED)
+                        gpuFloor.setFloorLevel(gpu.policyPath, level)
                         TuningOutcome.Applied()
                     }
                     is SideControlEdit.CpuFloor ->
@@ -205,20 +204,43 @@ class GlobalTuning(
     suspend fun applyProfile(profileId: String): TuningOutcome = withContext(Dispatchers.IO) {
         mutex.withLock {
             val policies = caps.policies()
-            ownership().withOwnership {
-                when (owner) {
-                    is ClockOwner.BoundGame -> return@withOwnership TuningOutcome.Blocked
-                    ClockOwner.GlobalAutoTdp -> releaseGlobalAutoTdp()
-                    ClockOwner.Free -> Unit
-                }
-                val outcome = applyBindingCaps(policies) { caps.applyDisplayProfileById(profileId) }.toOutcome()
-                capsWritten()
-                outcome
+            withManualClockOwnership {
+                writeCapsReassertingGpuUnderOwnership(policies) { caps.applyDisplayProfileById(profileId) }.toOutcome()
             }
         }
     }
 
-    suspend fun <T> applyBindingCaps(
+    private suspend fun withManualClockOwnership(write: suspend () -> TuningOutcome): TuningOutcome =
+        ownership().withOwnership {
+            when (owner) {
+                is ClockOwner.BoundGame -> return@withOwnership TuningOutcome.Blocked
+                ClockOwner.GlobalAutoTdp -> releaseGlobalAutoTdp()
+                ClockOwner.Free -> Unit
+            }
+            val outcome = write()
+            capsWritten()
+            outcome
+        }
+
+    /**
+     * Runs [writeCaps] and restores the GPU lock or floor under global tuning and clock ownership.
+     * A bound game blocks the write; following-global AutoTDP is released before the write.
+     * Callers must hold neither this module's mutex nor clock ownership.
+     */
+    suspend fun writeCapsReassertingGpu(
+        policies: List<CpuPolicyInfo>,
+        gpuFloorPercent: Int? = null,
+        writeCaps: suspend () -> Result<PerformanceRepository.ApplyOutcome>,
+    ): TuningOutcome = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            withManualClockOwnership {
+                writeCapsReassertingGpuUnderOwnership(policies, gpuFloorPercent, writeCaps).toOutcome()
+            }
+        }
+    }
+
+    /** [writeCapsReassertingGpu] for a caller already inside [ClockOwnership.withOwnership], which must not re-enter it. */
+    suspend fun <T> writeCapsReassertingGpuUnderOwnership(
         policies: List<CpuPolicyInfo>,
         gpuFloorPercent: Int? = null,
         writeCaps: suspend () -> T,
@@ -295,11 +317,12 @@ class GlobalTuning(
         if (side.gpuLocked) {
             gpuFloor.lockToCurrentCap(gpu.policyPath)
         } else {
-            val ceiling = shell.run("cat ${gpu.policyPath}/max_pwrlevel")?.trim()?.toIntOrNull() ?: return
-            val floor = gpuFloorLevelFor(gpu, side.gpuFloorPercent, ceiling)
-            gpuFloor.setFloorLevel(gpu.policyPath, floor)
+            gpuFloorLevel(gpu, side.gpuFloorPercent)?.let { gpuFloor.setFloorLevel(gpu.policyPath, it) }
         }
     }
+
+    private fun gpuFloorLevel(gpu: CpuPolicyInfo, percent: Int): Int? =
+        gpuFloor.readCeilingLevel(gpu.policyPath)?.let { gpuFloorLevelFor(gpu, percent, it) }
 
     private fun reapplyControlsReleasedByCaps(policies: List<CpuPolicyInfo>, side: SideControlState) {
         reapplyGpuControl(policies, side)

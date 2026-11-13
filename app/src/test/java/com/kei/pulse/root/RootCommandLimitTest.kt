@@ -9,8 +9,8 @@ import org.junit.Test
 
 class RootCommandLimitTest {
     @Test
-    fun `255 character command remains inline`() {
-        val command = "x".repeat(255)
+    fun `command at the PServer limit remains inline`() {
+        val command = "x".repeat(RootSupport.PSERVER_COMMAND_LIMIT)
         val received = mutableListOf<String>()
         val result = RootSupport.runRootCommand(command, PrivilegedShell {
             received += it
@@ -21,11 +21,11 @@ class RootCommandLimitTest {
     }
 
     @Test
-    fun `256 character command runs intact from a temporary script and cleans up on failure`() {
-        val command = "x".repeat(256)
+    fun `command over the PServer limit runs intact from a temporary script and cleans up on failure`() {
+        val command = "x".repeat(RootSupport.PSERVER_COMMAND_LIMIT + 1)
         lateinit var script: File
         val result = RootSupport.runRootCommand(command, PrivilegedShell { invocation ->
-            assertTrue(invocation.length <= 255)
+            assertTrue(invocation.length <= RootSupport.PSERVER_COMMAND_LIMIT)
             script = scriptFile(invocation)
             assertEquals(command, script.readText())
             null
@@ -40,7 +40,7 @@ class RootCommandLimitTest {
         val commands = mutableListOf<String>()
         lateinit var script: File
         val transport = PrivilegedShell { command ->
-            assertTrue(command.length <= 255)
+            assertTrue(command.length <= RootSupport.PSERVER_COMMAND_LIMIT)
             commands += command
             if (command.startsWith("sh ")) {
                 script = scriptFile(command)

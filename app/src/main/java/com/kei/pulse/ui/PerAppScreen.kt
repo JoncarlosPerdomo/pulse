@@ -47,6 +47,7 @@ import com.kei.pulse.model.PerformanceProfile
 import com.kei.pulse.model.PowerTier
 import com.kei.pulse.model.ProfileSource
 import com.kei.pulse.model.ProfileStateResolver
+import com.kei.pulse.model.SideControlState
 import com.kei.pulse.ui.theme.HudBackground
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -370,7 +371,7 @@ private fun PerAppConfigDialog(
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         DialogChip("Default", gpuFloorPercent == null) { gpuFloorPercent = null }
-                        listOf(0, 25, 50, 75).forEach { percent ->
+                        SideControlState.FLOOR_PERCENT_OPTIONS.forEach { percent ->
                             DialogChip(if (percent == 0) "Off" else "$percent%", gpuFloorPercent == percent) {
                                 gpuFloorPercent = percent
                             }
