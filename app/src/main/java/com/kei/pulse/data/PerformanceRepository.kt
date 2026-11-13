@@ -281,7 +281,7 @@ class PerformanceRepository(
     fun socModel(): String? = bundledProfileProvider.currentSocModel()
 
     /** Applies a display profile (saved profile or Stock) by id — the tile/per-app entry point. */
-    suspend fun applyDisplayProfileById(profileId: String): Result<ApplyOutcome> {
+    override suspend fun applyDisplayProfileById(profileId: String): Result<ApplyOutcome> {
         if (!rootCommandRunner.isAvailable) {
             return Result.failure(IllegalStateException("PServer not available"))
         }

@@ -25,6 +25,7 @@ interface CapWriter {
         isReset: Boolean,
         persistAsCustom: Boolean,
     ): Result<PerformanceRepository.ApplyOutcome>
+    suspend fun applyDisplayProfileById(profileId: String): Result<PerformanceRepository.ApplyOutcome>
 }
 
 sealed interface SideControlEdit {
@@ -195,6 +196,22 @@ class GlobalTuning(
                 }
                 val governorFailed = edit is SideControlEdit.Governor && outcome is TuningOutcome.Failed
                 persist(next, governorLabel.takeUnless { governorFailed })
+                capsWritten()
+                outcome
+            }
+        }
+    }
+
+    suspend fun applyProfile(profileId: String): TuningOutcome = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val policies = caps.policies()
+            ownership().withOwnership {
+                when (owner) {
+                    is ClockOwner.BoundGame -> return@withOwnership TuningOutcome.Blocked
+                    ClockOwner.GlobalAutoTdp -> releaseGlobalAutoTdp()
+                    ClockOwner.Free -> Unit
+                }
+                val outcome = applyBindingCaps(policies) { caps.applyDisplayProfileById(profileId) }.toOutcome()
                 capsWritten()
                 outcome
             }

@@ -863,6 +863,10 @@ class TunerViewModel(
         }
     }
 
+    fun setAutomationEnabled(enabled: Boolean) {
+        viewModelScope.launch { settingsStorage.persistAutomationEnabled(enabled) }
+    }
+
     fun setApplyLastProfileOnBoot(enabled: Boolean) {
         viewModelScope.launch {
             settingsStorage.persistApplyLastProfileOnBoot(enabled)

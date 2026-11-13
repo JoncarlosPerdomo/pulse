@@ -91,6 +91,16 @@
         </service>
 
         <receiver
+            android:name=".automation.AutomationReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.kei.pulse.action.SET_TIER" />
+                <action android:name="com.kei.pulse.action.APPLY_PROFILE" />
+                <action android:name="com.kei.pulse.action.QUERY" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
             android:name=".boot.BootCompletedReceiver"
             android:enabled="true"
             android:exported="true">

@@ -33,6 +33,7 @@ private val Context.settingsDataStore by preferencesDataStore(name = "android_tu
 class SettingsStorage(private val context: Context) {
 
     private val tileTapBehaviorKey = stringPreferencesKey("tile_tap_behavior")
+    private val automationEnabledKey = booleanPreferencesKey("automation_enabled")
     private val pulseEnabledKey = booleanPreferencesKey("pulse_enabled")
     private val applyLastProfileOnBootKey = booleanPreferencesKey("apply_last_profile_on_boot")
     private val sleepProfileEnabledKey = booleanPreferencesKey("sleep_profile_enabled")
@@ -97,6 +98,10 @@ class SettingsStorage(private val context: Context) {
     private val customPrimeBoostKey = booleanPreferencesKey("custom_prime_core_boost")
     private val customGovernorLabelKey = stringPreferencesKey("custom_governor_label")
 
+    suspend fun persistAutomationEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[automationEnabledKey] = enabled }
+    }
+
     val settings: Flow<AppSettings> = context.settingsDataStore.data.map { preferences ->
         AppSettings(
             themeId = preferences[themeIdKey]?.let(::parseThemeId) ?: PulseThemeId.SIGNAL,
@@ -108,6 +113,7 @@ class SettingsStorage(private val context: Context) {
                 ?.let(::parseBehavior)
                 ?: TileInteractionBehavior.SHOW_DIALOG,
             pulseEnabled = preferences[pulseEnabledKey] ?: true,
+            automationEnabled = preferences[automationEnabledKey] ?: false,
             applyLastProfileOnBoot = preferences[applyLastProfileOnBootKey] ?: false,
             sleepProfileEnabled = preferences[sleepProfileEnabledKey] ?: false,
             sleepProfileId = preferences[sleepProfileIdKey],

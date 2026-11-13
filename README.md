@@ -127,6 +127,53 @@ Save, edit, delete, reorder, import, and export profiles. Reapply-on-boot, sleep
 
 <!-- Screenshots welcome here: the profile editor and the Quick Settings tile dialog. -->
 
+### Automation broadcasts
+
+Enable **Settings > Automation > Allow automation broadcasts** first. It is off by default.
+Once enabled, any installed app can send these commands. There is no signature permission,
+so Tasker, Home Assistant integrations, and game launchers can use the same explicit receiver.
+The PULSE master switch must also be on. Turning automation off disables queries too.
+
+Send an ordered broadcast to `com.kei.pulse/.automation.AutomationReceiver`:
+
+```sh
+adb shell am broadcast -n com.kei.pulse/.automation.AutomationReceiver -a com.kei.pulse.action.SET_TIER --es tier max
+adb shell am broadcast -n com.kei.pulse/.automation.AutomationReceiver -a com.kei.pulse.action.SET_TIER --es tier balanced
+adb shell am broadcast -n com.kei.pulse/.automation.AutomationReceiver -a com.kei.pulse.action.SET_TIER --es tier power_saving
+adb shell am broadcast -n com.kei.pulse/.automation.AutomationReceiver -a com.kei.pulse.action.SET_TIER --es tier custom
+adb shell am broadcast -n com.kei.pulse/.automation.AutomationReceiver -a com.kei.pulse.action.APPLY_PROFILE --es name "My Game"
+adb shell am broadcast -n com.kei.pulse/.automation.AutomationReceiver -a com.kei.pulse.action.QUERY
+```
+
+`SET_TIER` takes a case-insensitive `tier`: `max`, `balanced`, `power_saving`, or `custom`.
+Custom restores the saved Custom snapshot and reports failure if none exists.
+`APPLY_PROFILE` takes an exact, case-sensitive saved or bundled profile `name`;
+missing and duplicate names return a failure. Stock is not a saved profile; use tier `max`
+for it. Profile application keeps the current tier and reasserts the global GPU lock or
+floor, like a per-app binding's cap write.
+
+The ordered broadcast result data and the `result` string extra contain the response.
+`am broadcast` prints this as `data="..."`. Write and error responses start with `applied:`, `blocked:`,
+`deferred:`, `failed:`, `invalid:`, or `disabled:`. A bound game's clock ownership blocks
+tier and profile changes. Following-global AutoTDP releases the clocks before applying.
+A rejected command never reports success. Writes appear under the `PulseAutomation` logcat tag.
+
+The result code is `-1` (`Activity.RESULT_OK`) for `applied:` and query results, and `1` for
+`disabled:`, `blocked:`, `deferred:`, `failed:`, and `invalid:`. `am broadcast` prints it as `result=`.
+The receiver answers within about 8 seconds. If a write is still running by then, the result is
+`deferred: still applying` with code `1`, and the write finishes anyway; send `QUERY` to read the outcome.
+
+A query reads live sysfs nodes, rather than saved profile values. Example result data:
+
+```text
+tier=Balanced; policy0.scaling_max_freq=2000000; policy4.scaling_max_freq=2400000; policy7.scaling_max_freq=2500000; gpu.max_pwrlevel=0; gpu.min_pwrlevel=13
+```
+
+CPU caps are in kHz per detected policy. GPU bounds are kgsl power-level indices
+(0 is fastest). Unreadable nodes say `unavailable`. The tier is PULSE's saved global tier;
+a bound game or AutoTDP may currently own the live caps. With the toggle off, the result is
+`disabled: enable Allow automation broadcasts in Settings` and no device access occurs.
+
 ### Five animated themes
 
 **Signal** (default), **Crimson**, **Cyberpunk**, **Ronin**, and **Ad Astra** — all near-black and OLED-friendly, each with its own procedurally-generated, animated background (pure Compose canvas — no shaders, no bitmaps).

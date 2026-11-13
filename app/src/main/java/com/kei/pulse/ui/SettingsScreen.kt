@@ -89,6 +89,7 @@ fun SettingsScreen(
     settings: AppSettings,
     onBack: () -> Unit,
     onPulseEnabledChange: (Boolean) -> Unit = {},
+    onAutomationEnabledChange: (Boolean) -> Unit,
     onRgbModeChange: (RgbMode) -> Unit = {},
     onRgbManualTargetChange: (RgbStick) -> Unit = {},
     onRgbManualStickChange: (RgbStick, Int, Float) -> Unit = { _, _, _ -> },
@@ -225,6 +226,26 @@ fun SettingsScreen(
                 TileBehaviorSelector(
                     selected = settings.tileTapBehavior,
                     onChange = onTileTapBehaviorChange,
+                )
+            }
+        }
+
+        SettingsSection(title = "Automation") {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Allow automation broadcasts", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "Allow other apps and adb to change tiers, apply profiles, and read clock caps. Off by default.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+                Switch(
+                    checked = settings.automationEnabled,
+                    onCheckedChange = onAutomationEnabledChange,
                 )
             }
         }

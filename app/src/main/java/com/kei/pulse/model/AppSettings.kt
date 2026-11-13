@@ -101,6 +101,8 @@ data class AppSettings(
      * control" state to leave the device in before uninstalling. Default on.
      */
     val pulseEnabled: Boolean = true,
+    /** Whether other apps and adb may drive PULSE through the exported automation receiver. Default off. */
+    val automationEnabled: Boolean = false,
     val applyLastProfileOnBoot: Boolean = false,
     val sleepProfileEnabled: Boolean = false,
     val sleepProfileId: String? = null,
