@@ -385,6 +385,7 @@ class CustomFanWatchdogTest {
         fun assertRestoredOnceAndUnlocked() {
             assertEquals(1, restores())
             assertFalse(lock.exists())
+            assertFalse(ack.exists())
         }
 
         private fun waitUntil(condition: () -> Boolean) {

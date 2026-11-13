@@ -144,7 +144,7 @@ class CustomFanWatchdog(
                     sleep $LOCK_POLL_SECONDS
                 done
                 echo ${'$'}${'$'} > "${'$'}lock/pid"
-                trap 'rm -f "${'$'}lock/pid"; rmdir "${'$'}lock"' EXIT
+                trap 'rm -f "${'$'}lock/pid" "${'$'}ack"; rmdir "${'$'}lock"' EXIT
                 if [ -e "${'$'}restoring" ]; then
                     read marker_ms < "${'$'}restoring"
                     read_clock
