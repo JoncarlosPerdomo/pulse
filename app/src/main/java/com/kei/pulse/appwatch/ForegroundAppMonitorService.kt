@@ -1097,9 +1097,12 @@ class ForegroundAppMonitorService : Service() {
     /** Re-assert the held Custom/tier caps ~every other tick (≈2s), the same locked path AutoTDP re-asserts on. */
     private suspend fun reassertBoundCaps() {
         val freqs = boundReassertFreqs
-        if (freqs.isEmpty()) return
+        if (freqs.isEmpty() || autoTdpPackage != null) return
         if (boundReassertTick++ % 2 != 0) return
-        AutoTuneController.applyFreqsToDevice(ensurePolicies(), freqs)
+        val policies = ensurePolicies()
+        container.globalTuning.applyBindingCaps(policies, boundConfig?.gpuFloorPercent) {
+            AutoTuneController.applyFreqsToDevice(policies, freqs)
+        }
     }
 
     /** Stop holding a binding's caps and hand its locks (incl. the prime `scaling_min`) back to stock (`644`). */
@@ -1682,7 +1685,7 @@ class ForegroundAppMonitorService : Service() {
             // carries a fan/refresh extra (applyConfig applies those; its AUTO_OFF "profile" is skipped there).
             val explicitlyOff = config != null && PerAppConfig.isAutoOff(config.profileBinding)
             val configEngages = config != null &&
-                !(explicitlyOff && config.fanMode == null && config.refreshRateHz == null)
+                !(explicitlyOff && config.fanMode == null && config.refreshRateHz == null && config.gpuFloorPercent == null)
             val autoDefault = config == null &&
                 container.settingsStorage.settings.first().autoTdpDefaultEnabled &&
                 isGlobalAutoTdpTarget(foreground)
@@ -1755,34 +1758,36 @@ class ForegroundAppMonitorService : Service() {
     private suspend fun applyConfig(config: PerAppConfig) {
         val parts = mutableListOf<String>()
         val tier = PerAppConfig.tierFromBinding(config.profileBinding)
-        when {
-            tier == PowerTier.CUSTOM -> {
-                // Custom = the user's saved Custom setup, same as the Custom tier in-app.
-                container.repository.restoreCustomValues().onSuccess {
-                    container.settingsStorage.persistActiveTierLabel(tier.label)
-                    // Match in-app Custom: re-assert the governor the user saved for Custom.
-                    container.settingsStorage.customTuning.first().governorLabel?.let { label ->
-                        GovernorController.OPTIONS.firstOrNull { it.label == label }?.let { option ->
-                            val policies = container.repository.observeState().first().policies
-                            governorController.setGovernor(policies, option)
+        container.globalTuning.applyBindingCaps(ensurePolicies(), config.gpuFloorPercent) {
+            when {
+                tier == PowerTier.CUSTOM -> {
+                    // Custom = the user's saved Custom setup, same as the Custom tier in-app.
+                    container.repository.restoreCustomValues().onSuccess {
+                        container.settingsStorage.persistActiveTierLabel(tier.label)
+                        // Match in-app Custom: re-assert the governor the user saved for Custom.
+                        container.settingsStorage.customTuning.first().governorLabel?.let { label ->
+                            GovernorController.OPTIONS.firstOrNull { it.label == label }?.let { option ->
+                                val policies = container.repository.observeState().first().policies
+                                governorController.setGovernor(policies, option)
+                            }
                         }
+                        parts += tier.label
                     }
-                    parts += tier.label
                 }
+                tier != null -> {
+                    container.repository.applyTier(tier).onSuccess {
+                        container.settingsStorage.persistActiveTierLabel(tier.label)
+                        parts += tier.label
+                    }
+                }
+                // AUTO_OFF is an explicit "no AutoTDP" sentinel, not a saved-profile id — skip the profile apply
+                // (its fan/refresh extras below still apply). Other non-null bindings are display-profile ids.
+                config.profileBinding != null && !PerAppConfig.isAutoOff(config.profileBinding) ->
+                    container.repository.applyDisplayProfileById(config.profileBinding).onSuccess {
+                        parts += container.repository.observeState().first().displayProfiles
+                            .firstOrNull { it.id == config.profileBinding }?.name ?: "Saved profile"
+                    }
             }
-            tier != null -> {
-                container.repository.applyTier(tier).onSuccess {
-                    container.settingsStorage.persistActiveTierLabel(tier.label)
-                    parts += tier.label
-                }
-            }
-            // AUTO_OFF is an explicit "no AutoTDP" sentinel, not a saved-profile id — skip the profile apply
-            // (its fan/refresh extras below still apply). Other non-null bindings are display-profile ids.
-            config.profileBinding != null && !PerAppConfig.isAutoOff(config.profileBinding) ->
-                container.repository.applyDisplayProfileById(config.profileBinding).onSuccess {
-                    parts += container.repository.observeState().first().displayProfiles
-                        .firstOrNull { it.id == config.profileBinding }?.name ?: "Saved profile"
-                }
         }
         config.fanMode?.let { mode ->
             fanController.setMode(mode)
@@ -1829,8 +1834,10 @@ class ForegroundAppMonitorService : Service() {
 
     private suspend fun restoreSnapshot(notify: Boolean = true) {
         val restore = container.perAppConfigStorage.restoreState.first() ?: return
-        if (restore.values.isNotEmpty()) {
-            container.repository.applyRawValues(restore.values, restore.appliedDisplayProfileId)
+        container.globalTuning.applyBindingCaps(ensurePolicies()) {
+            if (restore.values.isNotEmpty()) {
+                container.repository.applyRawValues(restore.values, restore.appliedDisplayProfileId)
+            }
         }
         restore.activeTierLabel?.let { container.settingsStorage.persistActiveTierLabel(it) }
         restore.fanMode?.let { fanController.setMode(it) }

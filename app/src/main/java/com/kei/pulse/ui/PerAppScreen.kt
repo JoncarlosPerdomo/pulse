@@ -207,6 +207,7 @@ private fun bindingSummary(config: PerAppConfig?, profiles: List<PerformanceProf
         else -> PerAppConfig.tierFromBinding(config.profileBinding)?.let { parts += it.label }
             ?: run { parts += profiles.firstOrNull { it.id == config.profileBinding }?.name ?: "Saved profile" }
     }
+    if (!PerAppConfig.isAuto(config.profileBinding)) config.gpuFloorPercent?.let { parts += "GPU floor $it%" }
     config.fanMode?.let { parts += "Fan ${FanController.labelFor(it)}" }
     // Refresh rate only matters for non-AutoTDP bindings (AutoTDP forces max).
     if (!PerAppConfig.isAuto(config.profileBinding)) config.refreshRateHz?.let { parts += "${it}Hz" }
@@ -320,6 +321,7 @@ private fun PerAppConfigDialog(
 ) {
     var profileBinding by remember { mutableStateOf(existing?.profileBinding) }
     var fanMode by remember { mutableStateOf(existing?.fanMode) }
+    var gpuFloorPercent by remember { mutableStateOf(existing?.gpuFloorPercent) }
     var refreshRate by remember { mutableStateOf(existing?.refreshRateHz) }
     // No "Default" chips: pre-fill from the global setting (snapped to this SoC's options) and always save
     // a concrete value. Old null bindings still inherit via the service until re-saved here.
@@ -362,6 +364,18 @@ private fun PerAppConfigDialog(
                 // AutoTDP uses the global fan choice; the per-app fan picker is hidden for it until the
                 // service layer supports per-app fan overrides during AutoTDP.
                 if (!PerAppConfig.isAuto(profileBinding)) {
+                    DialogGroupLabel("GPU FLOOR")
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        DialogChip("Default", gpuFloorPercent == null) { gpuFloorPercent = null }
+                        listOf(0, 25, 50, 75).forEach { percent ->
+                            DialogChip(if (percent == 0) "Off" else "$percent%", gpuFloorPercent == percent) {
+                                gpuFloorPercent = percent
+                            }
+                        }
+                    }
                     DialogGroupLabel("FAN (ODIN)")
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -421,7 +435,7 @@ private fun PerAppConfigDialog(
                 }
 
                 Text(
-                    text = "Applied when this app comes to the foreground; the previous state is restored when it leaves. \"Default\" leaves that control alone. AutoTDP pins the panel to max refresh and trims the CPU then GPU to hold your FPS target at the lowest power; pair it with the global Custom fan on the main screen. \"Default\" target uses the global default, \"Max\" runs uncapped. Custom applies your saved Custom setup — for frequencies unique to this app, save a profile on the main screen and bind it here.",
+                    text = "Applied when this app comes to the foreground; the previous state is restored when it leaves. \"Default\" inherits the global GPU floor and leaves other controls alone. AutoTDP pins the panel to max refresh and trims the CPU then GPU to hold your FPS target at the lowest power; pair it with the global Custom fan on the main screen. \"Default\" target uses the global default, \"Max\" runs uncapped. Custom applies your saved Custom setup — for frequencies unique to this app, save a profile on the main screen and bind it here.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -436,6 +450,7 @@ private fun PerAppConfigDialog(
                         profileBinding = profileBinding,
                         fanMode = fanMode,
                         refreshRateHz = refreshRate,
+                        gpuFloorPercent = gpuFloorPercent,
                         fpsTarget = fpsTarget,
                         aggressivePark = aggressivePark,
                         bias = bias,

@@ -196,12 +196,37 @@ class GlobalTuning(
         }
     }
 
+    suspend fun <T> applyBindingCaps(
+        policies: List<CpuPolicyInfo>,
+        gpuFloorPercent: Int? = null,
+        writeCaps: suspend () -> T,
+    ): T = withContext(Dispatchers.IO) {
+        val global = store.state().sideControls
+        val side = if (gpuFloorPercent == null) global else global.copy(gpuLocked = false, gpuFloorPercent = gpuFloorPercent)
+        val result = writeCaps()
+        reapplyGpuControl(policies, side)
+        result
+    }
+
+    private suspend fun applyCaps(
+        policies: List<CpuPolicyInfo>,
+        values: Map<Int, Int>,
+        isReset: Boolean,
+        persistAsCustom: Boolean,
+        side: SideControlState,
+    ): Result<PerformanceRepository.ApplyOutcome> {
+        val result = caps.applyCaps(policies, values, isReset, persistAsCustom)
+        reapplyControlsReleasedByCaps(policies, side)
+        return result
+    }
+
     private suspend fun applyPreset(policies: List<CpuPolicyInfo>, tier: PowerTier): TuningOutcome {
-        val result = caps.applyCaps(
+        val result = applyCaps(
             policies = policies,
             values = tierFrequencies(tier, policies),
             isReset = tier == PowerTier.MAX,
             persistAsCustom = false,
+            side = SideControlState.CLEARED,
         )
         val applied = result.getOrElse { return TuningOutcome.Failed(FailureReason.WRITE_FAILED, it.message) }
         cpuFloor.setFloor(policies, 0)
@@ -209,23 +234,22 @@ class GlobalTuning(
     }
 
     private suspend fun restoreCustom(policies: List<CpuPolicyInfo>, snapshot: CustomTuning): TuningOutcome {
+        val side = TierTransition.afterCustomRestore(snapshot)
         val saved = store.customValues().filterKeys { id -> policies.any { it.id == id } }
         var failure: TuningOutcome.Failed? = null
         var applied: PerformanceRepository.ApplyOutcome? = null
         if (saved.isEmpty()) {
             failure = TuningOutcome.Failed(FailureReason.NO_SAVED_CUSTOM)
         } else {
-            caps.applyCaps(policies, saved, isReset = false, persistAsCustom = true)
+            applyCaps(policies, saved, isReset = false, persistAsCustom = true, side = side)
                 .onSuccess { applied = it }
                 .onFailure { failure = TuningOutcome.Failed(FailureReason.WRITE_FAILED, it.message) }
         }
-        val side = TierTransition.afterCustomRestore(snapshot)
         if (side.powerTargetEnabled) {
             applyPowerTargetCaps(policies, side)
                 .onSuccess { applied = it }
                 .onFailure { failure = TuningOutcome.Failed(FailureReason.WRITE_FAILED, it.message) }
         }
-        reapplyControlsReleasedByCaps(policies, side)
         val governor = snapshot.governorLabel?.let { setGovernor(policies, it) }
         return failure ?: TuningOutcome.Applied(caps = applied, governor = governor)
     }
@@ -234,25 +258,29 @@ class GlobalTuning(
         policies: List<CpuPolicyInfo>,
         side: SideControlState,
     ): Result<PerformanceRepository.ApplyOutcome> {
-        val result = caps.applyCaps(
+        val result = applyCaps(
             policies = policies,
             values = PowerTargetMath.capsForPercent(policies, side.powerTargetPercent, cpuOnly = side.powerTargetCpuOnly),
             isReset = side.powerTargetPercent >= 100,
             persistAsCustom = true,
+            side = side,
         )
-        val gpu = policies.firstOrNull { it.isGpu }
-        if (side.gpuLocked && gpu != null) gpuFloor.lockToCurrentCap(gpu.policyPath)
         return result
     }
 
-    private fun reapplyControlsReleasedByCaps(policies: List<CpuPolicyInfo>, side: SideControlState) {
-        val gpu = policies.firstOrNull { it.isGpu }
-        if (gpu != null) {
-            when {
-                side.gpuLocked -> gpuFloor.lockToCurrentCap(gpu.policyPath)
-                side.gpuFloorPercent > 0 -> gpuFloor.setFloorLevel(gpu.policyPath, gpuFloorLevelFor(gpu, side.gpuFloorPercent))
-            }
+    private fun reapplyGpuControl(policies: List<CpuPolicyInfo>, side: SideControlState) {
+        val gpu = policies.firstOrNull { it.isGpu } ?: return
+        if (side.gpuLocked) {
+            gpuFloor.lockToCurrentCap(gpu.policyPath)
+        } else {
+            val ceiling = shell.run("cat ${gpu.policyPath}/max_pwrlevel")?.trim()?.toIntOrNull() ?: return
+            val floor = gpuFloorLevelFor(gpu, side.gpuFloorPercent).coerceAtLeast(ceiling)
+            gpuFloor.setFloorLevel(gpu.policyPath, floor)
         }
+    }
+
+    private fun reapplyControlsReleasedByCaps(policies: List<CpuPolicyInfo>, side: SideControlState) {
+        reapplyGpuControl(policies, side)
         if (side.cpuFloorPercent > 0) cpuFloor.setFloor(policies, side.cpuFloorPercent)
         val prime = primeOf(policies)
         if (side.primeCoreBoostLimited && !side.powerTargetEnabled && prime != null) {
