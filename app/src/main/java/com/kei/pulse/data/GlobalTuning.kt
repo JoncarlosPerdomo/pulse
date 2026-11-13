@@ -342,7 +342,7 @@ class GlobalTuning(
 
         private fun slowestGpuLevel(gpu: CpuPolicyInfo): Int = (gpu.supportedFrequencies.size - 1).coerceAtLeast(0)
 
-        private fun gpuFloorLevelFor(gpu: CpuPolicyInfo, percent: Int): Int {
+        internal fun gpuFloorLevelFor(gpu: CpuPolicyInfo, percent: Int): Int {
             val asc = gpu.supportedFrequencies
             if (percent <= 0 || asc.isEmpty()) return slowestGpuLevel(gpu)
             val targetFreq = gpu.selectableMaxFreq * percent / 100

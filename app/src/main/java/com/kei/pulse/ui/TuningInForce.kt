@@ -1,5 +1,6 @@
 package com.kei.pulse.ui
 
+import com.kei.pulse.data.GlobalTuning.Companion.gpuFloorLevelFor
 import com.kei.pulse.model.CpuPolicyInfo
 import kotlin.math.abs
 
@@ -31,14 +32,6 @@ internal fun capsInForce(
     return if (missing) TuningInForce.Unknown else TuningInForce.Applied
 }
 
-internal fun gpuFloorLevel(gpu: CpuPolicyInfo?, percent: Int): Int? {
-    val frequencies = gpu?.supportedFrequencies?.takeIf { it.isNotEmpty() } ?: return null
-    if (percent <= 0) return frequencies.lastIndex
-    val target = gpu.selectableMaxFreq.toLong() * percent / 100
-    val position = frequencies.indices.minBy { abs(frequencies[it] - target) }
-    return frequencies.lastIndex - position
-}
-
 internal fun gpuFloorMhz(gpu: CpuPolicyInfo?, level: Int?): Int? {
     val frequencies = gpu?.supportedFrequencies ?: return null
     if (level == null || level !in frequencies.indices) return null
@@ -46,7 +39,8 @@ internal fun gpuFloorMhz(gpu: CpuPolicyInfo?, level: Int?): Int? {
 }
 
 internal fun gpuFloorInForce(gpu: CpuPolicyInfo?, percent: Int, actualLevel: Int?): TuningInForce {
-    val expectedLevel = gpuFloorLevel(gpu, percent) ?: return TuningInForce.Unknown
+    if (gpu == null || gpu.supportedFrequencies.isEmpty()) return TuningInForce.Unknown
+    val expectedLevel = gpuFloorLevelFor(gpu, percent)
     if (gpuFloorMhz(gpu, actualLevel) == null) return TuningInForce.Unknown
     return if (expectedLevel == actualLevel) TuningInForce.Applied else TuningInForce.NotApplied
 }

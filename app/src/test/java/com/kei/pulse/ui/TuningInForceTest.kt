@@ -1,5 +1,6 @@
 package com.kei.pulse.ui
 
+import com.kei.pulse.data.GlobalTuning.Companion.gpuFloorLevelFor
 import com.kei.pulse.model.CpuPolicyInfo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -58,7 +59,7 @@ class TuningInForceTest {
     fun `percent maps to closest frequency and reversed power level`() {
         val expected = mapOf(0 to 160, 25 to 222, 50 to 525, 75 to 740)
         for ((percent, mhz) in expected) {
-            val level = gpuFloorLevel(gpu, percent)
+            val level = gpuFloorLevelFor(gpu, percent)
             assertEquals(mhz, gpuFloorMhz(gpu, level))
             assertEquals(TuningInForce.Applied, gpuFloorInForce(gpu, percent, level))
         }
@@ -66,24 +67,24 @@ class TuningInForceTest {
 
     @Test
     fun `floor reset makes the saved chip not applied`() {
-        assertEquals(TuningInForce.NotApplied, gpuFloorInForce(gpu, 50, gpuFloorLevel(gpu, 0)))
-        assertEquals(TuningInForce.Applied, gpuFloorInForce(gpu, 50, gpuFloorLevel(gpu, 50)))
+        assertEquals(TuningInForce.NotApplied, gpuFloorInForce(gpu, 50, gpuFloorLevelFor(gpu, 0)))
+        assertEquals(TuningInForce.Applied, gpuFloorInForce(gpu, 50, gpuFloorLevelFor(gpu, 50)))
     }
 
     @Test
     fun `floor mapping handles different GPU tables and ties`() {
         val otherGpu = policy(CpuPolicyInfo.GPU_POLICY_ID, listOf(220000, 350000, 500000, 615000, 750000, 900000))
-        assertEquals(220, gpuFloorMhz(otherGpu, gpuFloorLevel(otherGpu, 25)))
-        assertEquals(500, gpuFloorMhz(otherGpu, gpuFloorLevel(otherGpu, 50)))
-        assertEquals(615, gpuFloorMhz(otherGpu, gpuFloorLevel(otherGpu, 75)))
+        assertEquals(220, gpuFloorMhz(otherGpu, gpuFloorLevelFor(otherGpu, 25)))
+        assertEquals(500, gpuFloorMhz(otherGpu, gpuFloorLevelFor(otherGpu, 50)))
+        assertEquals(615, gpuFloorMhz(otherGpu, gpuFloorLevelFor(otherGpu, 75)))
         val tied = policy(CpuPolicyInfo.GPU_POLICY_ID, listOf(300000, 600000, 900000))
-        assertEquals(300, gpuFloorMhz(tied, gpuFloorLevel(tied, 50)))
+        assertEquals(300, gpuFloorMhz(tied, gpuFloorLevelFor(tied, 50)))
     }
 
     @Test
     fun `missing or invalid floor readback stays unknown`() {
-        assertNull(gpuFloorLevel(null, 50))
-        assertNull(gpuFloorLevel(gpu.copy(supportedFrequencies = emptyList()), 50))
+        assertEquals(TuningInForce.Unknown, gpuFloorInForce(null, 50, 0))
+        assertEquals(TuningInForce.Unknown, gpuFloorInForce(gpu.copy(supportedFrequencies = emptyList()), 50, 0))
         for (level in listOf(null, -1, gpu.supportedFrequencies.size)) {
             assertNull(gpuFloorMhz(gpu, level))
             assertEquals(TuningInForce.Unknown, gpuFloorInForce(gpu, 50, level))

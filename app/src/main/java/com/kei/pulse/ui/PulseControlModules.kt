@@ -74,6 +74,7 @@ import com.kei.pulse.model.FanCurveEditing
 import com.kei.pulse.model.FanGraphGeometry
 import com.kei.pulse.model.FanTempController
 import com.kei.pulse.model.PerAppConfig
+import com.kei.pulse.data.GlobalTuning.Companion.gpuFloorLevelFor
 import com.kei.pulse.model.CpuPolicyInfo
 import com.kei.pulse.model.PowerTier
 import kotlin.math.hypot
@@ -863,7 +864,7 @@ fun GpuFloorModule(
                     PulseChip(
                         label = buildString {
                             append(if (pct == 0) "Off" else "$pct%")
-                            val mhz = gpuFloorMhz(gpu, gpuFloorLevel(gpu, pct))
+                            val mhz = gpuFloorMhz(gpu, gpu?.let { gpuFloorLevelFor(it, pct) })
                             append(mhz?.let { " - $it MHz" } ?: " - Unverified")
                             if (currentPercent == pct) {
                                 append(" - ${gpuFloorInForce(gpu, pct, actualLevel).statusLabel()}")
