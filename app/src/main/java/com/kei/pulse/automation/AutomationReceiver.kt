@@ -19,15 +19,14 @@ class AutomationReceiver : BroadcastReceiver() {
                 val result = runCatching {
                     val container = AppContainer(appContext)
                     val enabled = container.settingsStorage.automationEnabled.first()
-                    val command = if (!enabled) AutomationCommand.Query else parseAutomationCommand(intent.action, mapOf(
+                    val command = parseAutomationCommand(intent.action, mapOf(
                         "tier" to intent.getStringExtra("tier"),
                         "name" to intent.getStringExtra("name"),
                     ))
-                    val target = AutomationTargetAdapter(container)
                     if (enabled && !container.settingsStorage.settings.first().pulseEnabled) {
                         "disabled: PULSE master switch is off"
                     } else {
-                        dispatchAutomationCommand(enabled, command, target)
+                        dispatchAutomationCommand(enabled, command, AutomationTargetAdapter(container))
                     }
                 }.getOrElse { "failed: ${it.message ?: it.javaClass.simpleName}" }
                 pending.setResult(0, result, Bundle().apply { putString("result", result) })

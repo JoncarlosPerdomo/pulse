@@ -150,7 +150,7 @@ adb shell am broadcast -n com.kei.pulse/.automation.AutomationReceiver -a com.ke
 Custom restores the saved Custom snapshot and reports failure if none exists.
 `APPLY_PROFILE` takes an exact, case-sensitive saved or bundled profile `name`;
 missing and duplicate names return a failure. Profile application keeps the current tier
-and re-pins an enabled GPU lock, matching the UI's profile apply behavior.
+and reasserts the global GPU lock or floor, like a per-app binding's cap write.
 
 The ordered broadcast result data and the `result` string extra contain the response.
 `am broadcast` prints this as `data="..."`. Write and error responses start with `applied:`, `blocked:`,

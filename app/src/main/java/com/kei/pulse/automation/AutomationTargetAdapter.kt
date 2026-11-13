@@ -2,7 +2,6 @@ package com.kei.pulse.automation
 
 import android.util.Log
 import com.kei.pulse.AppContainer
-import com.kei.pulse.data.GpuFloorController
 import com.kei.pulse.data.TuningOutcome
 import com.kei.pulse.model.ClockOwner
 import com.kei.pulse.model.ClockOwnership
@@ -22,27 +21,17 @@ internal class AutomationTargetAdapter(private val container: AppContainer) : Au
         }
         if (matches.isEmpty()) return "failed: profile not found: $name"
         if (matches.size != 1) return "failed: ambiguous profile name: $name"
+        val profile = matches.single()
         val ownership = AppContainer.activeClockOwnership ?: ClockOwnership.FREE
         return ownership.withOwnership {
-            if (owner is ClockOwner.BoundGame) return@withOwnership "blocked: bound game owns clocks"
+            if (owner is ClockOwner.BoundGame) return@withOwnership report("profile=$name", TuningOutcome.Blocked)
             if (owner == ClockOwner.GlobalAutoTdp) releaseGlobalAutoTdp()
-            val result = repository.applyDisplayProfileById(matches.single().id)
-            val applied = result.getOrElse {
-                Log.i("PulseAutomation", "write profile=$name failed=${it.message}")
-                return@withOwnership "failed: ${it.message}"
-            }
-            val settings = container.settingsStorage.settings.first()
-            var lockFailed = false
-            if (settings.gpuLocked) {
-                val gpu = repository.currentPolicies().firstOrNull { it.isGpu }
-                val level = gpu?.let { GpuFloorController().lockToCurrentCap(it.policyPath) }
-                Log.i("PulseAutomation", "write gpu lock min_pwrlevel=max_pwrlevel readback=$level")
-                lockFailed = level == null
-            }
+            val applied = container.globalTuning.applyBindingCaps(repository.currentPolicies()) {
+                repository.applyDisplayProfileById(profile.id)
+            }.getOrElse { return@withOwnership "failed: ${it.message}" }
             capsWritten()
-            container.repository.selectProfile(matches.single().id)
-            val outcome = report("profile=$name caps_khz=${matches.single().maxFrequencies}", TuningOutcome.Applied(caps = applied))
-            if (lockFailed) "failed: GPU lock readback failed" else outcome
+            repository.selectProfile(profile.id)
+            report("profile=$name caps_khz=${profile.maxFrequencies}", TuningOutcome.Applied(caps = applied))
         }
     }
 
