@@ -368,12 +368,7 @@ class MainActivity : ComponentActivity() {
 
     private fun PendingGrant.requestMessage(): String = when (awaiting) {
         SpecialAccess.DRAW_OVERLAY -> "Allow \"Display over other apps\" for PULSE, then come back"
-        SpecialAccess.USAGE_ACCESS -> when (feature) {
-            GatedFeature.PER_APP -> "Per-app profiles need Usage access to detect the foreground app."
-            GatedFeature.AUTO_TDP -> "AutoTDP needs Usage access to see which game is running."
-            GatedFeature.OVERLAY -> "The overlay needs Usage access to know which game is on screen."
-            GatedFeature.QUICK_ACCESS -> "The Quick Access bar needs Usage access to know which game is on screen."
-        } + " Allow it for PULSE, then come back."
+        SpecialAccess.USAGE_ACCESS -> "To turn on ${feature.label}, allow Usage access for PULSE."
     }
 
     private fun PendingGrant.declinedMessage(): String = when (awaiting) {
