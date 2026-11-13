@@ -768,7 +768,10 @@ class ForegroundAppMonitorService : Service() {
             }
             when {
                 overlayShouldShow && !overlay.isShowing -> { showOverlay(settings); stats?.let { overlay.update(it) } }
-                overlayShouldShow -> stats?.let { overlay.update(it) }
+                overlayShouldShow -> {
+                    overlay.applyLayout(settings)
+                    stats?.let { overlay.update(it) }
+                }
                 overlay.isShowing -> hideOverlay()
             }
             // Show the handle unless the user hid it AND has a combo to open it with (else they'd be locked out).

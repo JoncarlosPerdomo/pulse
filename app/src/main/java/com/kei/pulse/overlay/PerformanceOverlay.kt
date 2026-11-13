@@ -10,9 +10,11 @@ import android.view.Gravity
 import android.view.WindowManager
 import androidx.core.content.getSystemService
 import com.kei.pulse.model.AppSettings
+import com.kei.pulse.model.OverlayElement
 import com.kei.pulse.model.OverlayPreset
 import com.kei.pulse.ui.theme.PulseTheme
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.updateAndGet
 
 /**
  * Owns the floating OSD window. All WindowManager operations are marshalled to the main thread
@@ -32,6 +34,15 @@ class PerformanceOverlay(private val context: Context) {
 
     val isShowing: Boolean get() = window != null
 
+    private data class OverlayLayout(
+        val preset: OverlayPreset,
+        val opacityPercent: Int,
+        val elements: Set<OverlayElement>,
+    )
+
+    @Volatile
+    private var appliedLayout: OverlayLayout? = null
+
     private var themeSettings: AppSettings = AppSettings()
     private var onMoved: ((x: Int, y: Int) -> Unit)? = null
     private var onPresetCycled: ((OverlayPreset) -> Unit)? = null
@@ -46,6 +57,20 @@ class PerformanceOverlay(private val context: Context) {
         statsFlow.value = stats
     }
 
+    /**
+     * Apply the persisted layout (density, opacity, shown items) to a live HUD when it changes. Leaves the
+     * lock alone, and ignores unchanged settings so an in-HUD preset cycle isn't undone before it persists.
+     */
+    fun applyLayout(settings: AppSettings) {
+        val layout = OverlayLayout(settings.overlayPreset, settings.overlayOpacity, settings.overlayElements)
+        if (layout == appliedLayout) return
+        appliedLayout = layout
+        val next = configFlow.updateAndGet {
+            it.copy(preset = layout.preset, opacityPercent = layout.opacityPercent, elements = layout.elements)
+        }
+        main.post { reapply(next) }
+    }
+
     fun show(
         settings: AppSettings,
         config: OverlayConfig,
@@ -55,6 +80,7 @@ class PerformanceOverlay(private val context: Context) {
     ) {
         themeSettings = settings
         configFlow.value = config
+        appliedLayout = OverlayLayout(config.preset, config.opacityPercent, config.elements)
         floatX = settings.overlayPosX
         floatY = settings.overlayPosY
         this.onMoved = onMoved
