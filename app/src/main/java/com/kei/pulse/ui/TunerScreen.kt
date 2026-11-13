@@ -79,6 +79,7 @@ import com.kei.pulse.model.CpuPolicyInfo
 import com.kei.pulse.model.PerformanceProfile
 import com.kei.pulse.model.ProfileStateResolver
 import com.kei.pulse.model.ProfileSource
+import com.kei.pulse.model.DeviceLink
 import com.kei.pulse.model.TunerState
 import kotlinx.coroutines.delay
 
@@ -170,9 +171,9 @@ fun MainTunerScreen(
                 onOpenSettings = onOpenSettings,
             )
 
-            if (state.isLoading) {
+            if (state.link == DeviceLink.SCANNING) {
                 LoadingClustersCard()
-            } else if (!state.isPServerAvailable) {
+            } else if (state.link == DeviceLink.UNSUPPORTED) {
                 Text(
                     text = "Your device is not compatible with this app",
                     style = MaterialTheme.typography.headlineSmall,
@@ -390,7 +391,7 @@ fun CompactTunerScreen(
                 compactMode = true,
                 onOpenSettings = null,
             )
-            if (state.isLoading) {
+            if (state.link == DeviceLink.SCANNING) {
                 LoadingClustersCard()
             } else {
                 ProfileChipSelector(
@@ -422,7 +423,7 @@ fun CompactTunerScreen(
                         onClick = {
                             onApplyCurrent(state)
                         },
-                        enabled = state.policies.isNotEmpty() && state.isPServerAvailable,
+                        enabled = state.policies.isNotEmpty() && state.link == DeviceLink.LINKED,
                         modifier = Modifier.weight(1f),
                         contentPadding = PaddingValues(vertical = 14.dp),
                     ) {
@@ -552,7 +553,7 @@ private fun Header(
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    PServerStatusChip(isLinked = state.isPServerAvailable && state.policies.isNotEmpty())
+                    PServerStatusChip(isLinked = state.link == DeviceLink.LINKED && state.policies.isNotEmpty())
                 }
                 onOpenSettings?.let { openSettings ->
                     IconButton(onClick = openSettings) {
@@ -706,7 +707,7 @@ private fun ProfileListSection(
 
         val canApplySelectedProfile = state.selectedDisplayProfileId != null &&
             state.policies.isNotEmpty() &&
-            state.isPServerAvailable
+            state.link == DeviceLink.LINKED
         Spacer(Modifier.size(4.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1138,9 +1139,9 @@ private fun ProfileEditorDialog(
 
 @Composable
 private fun EmptyState(state: TunerState) {
-    SectionCard(title = if (state.isLoading) "Scanning CPU Clusters" else "No CPU Clusters Found") {
+    SectionCard(title = if (state.link == DeviceLink.SCANNING) "Scanning CPU Clusters" else "No CPU Clusters Found") {
         Text(
-            text = if (state.isLoading) {
+            text = if (state.link == DeviceLink.SCANNING) {
                 "Scanning CPU clusters..."
             } else {
                 "No compatible CPU frequency clusters were found."

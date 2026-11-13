@@ -75,10 +75,7 @@ class AutoTuneController(
     private var reprobeCounter = 0
     private var gpuIdleStreak = 0 // consecutive steps the 3D GPU is idle (media) — drops its harvest floor
     private var steadyCount = 0 // consecutive steps with real, continuous rendering
-    private var primeParked = false // prime cores currently offlined
-    private var parkSteady = 0 // consecutive steps eligible to park (hysteresis)
-    private var parkCooldown = 0 // steps to wait before re-parking after a park hurt FPS
-    private var jankAtPark = 0f
+    private var park: PrimePark = PrimePark.Online()
     private var bottleneck = Bottleneck.NONE // which domain is the limiter this step (Bug 6)
     private var cpuPeakPct = -1 // busiest PRIME-cluster core %, this step (park guard; -1 = unknown)
     private var cpuCorePeakPct = -1 // busiest single core across ALL CPUs (hot-thread bottleneck; -1 = unknown)
@@ -95,16 +92,10 @@ class AutoTuneController(
     // instead of being re-trimmed to CPU_MIN every reprobe (the perf-cluster oscillation). Decays slowly.
     private val domainFloor = HashMap<Int, Int>()
     private var floorDecayCounter = 0
-    // Recovery lockout: a *sustained* dip/roughness means we've harvested into — or a scene change caused —
-    // a real stutter. Stop harvesting, snap the caps back up to the last smooth point, and raise the limiter
-    // (the saturated GPU first) until frames recover; then a learned-floor bump + a short cooldown prevent
-    // an immediate relapse (the TRIM↔RAISE flip-flop that left fps at 42–55 for ~90 s in the field log).
     private var gpuBusyPct = -1 // raw GPU busy% (saturation at current clock) this step (GPU-first recovery)
     private var cpuBusyPct = -1 // aggregate CPU load% this step (not-clock-bound harvest signal)
     private var drawWEma = -1f // smoothed system draw (W) on battery; -1 = charging/unknown (power ceiling off)
-    private var primeBoundStreak = 0 // consecutive prime-bound below-target ticks → latches "target unreachable"
-    private var primeBoundReleaseStreak = 0 // consecutive reach-target / bottleneck-shift ticks → releases the latch
-    private var primeBoundLatched = false // settle is LATCHED on; a lucky fps spike can't knock it loose into a chase
+    private var primeWall = PrimeWallLatch()
     private var powerCooldown = 0 // ticks left suppressing fps-chase raises after the power ceiling fired (anti-bounce)
     private var frameTimeTailMs = -1f // worst present-to-present (ms) this step; -1 = unknown (margin gate)
     private var tailEma = 0f // EMA of the frametime tail; the gate acts on THIS (not the raw worst) so an
@@ -112,12 +103,32 @@ class AutoTuneController(
     // bias-scaled (see [gateParams]): EFFICIENT smooths hard + high thresholds (ignore jitter, harvest);
     // SMOOTH reacts fast + low thresholds (protect frames).
     private var marginOverStreak = 0 // consecutive holding-but-tail-over-budget steps (pre-raise confirm)
-    private var troubleStreak = 0 // consecutive rough ticks (toward engaging the lockout)
-    private var recoverStreak = 0 // consecutive smooth ticks while locked (toward releasing it)
-    private var jankLocked = false // in recovery: harvesting suppressed, raising to recover
+    private var lockout: Lockout = Lockout.Watching()
     private var harvestCooldown = 0 // ticks to keep harvesting suppressed after a recovery
     private val lastGoodCaps = HashMap<Int, Int>() // caps at the last smooth, in-band operating point
-    private val lockRaised = HashSet<Int>() // domains raised during this lockout (floor-pinned on exit)
+
+    /**
+     * Prime-core parking. Online, it counts consecutive park-eligible steps (hysteresis) and, after a park
+     * that cost frames, waits out a re-park cooldown. Parked, it remembers the jank level it parked at so a
+     * rise in roughness re-onlines the cores.
+     */
+    private sealed interface PrimePark {
+        data class Online(val eligibleStreak: Int = 0, val cooldown: Int = 0) : PrimePark
+        data class Parked(val jankAtPark: Float) : PrimePark
+    }
+
+    /**
+     * Recovery lockout: a *sustained* dip/roughness means we've harvested into — or a scene change caused —
+     * a real stutter. [Watching] counts consecutive rough ticks; at [LOCK_ENTER_TICKS] it goes [Locked]: stop
+     * harvesting, snap the caps back up to the last smooth point, and raise the limiter (the saturated GPU
+     * first) until [LOCK_RECOVER_TICKS] smooth ticks; then the [Locked.raised] domains get a learned-floor bump
+     * and a short [harvestCooldown] prevents an immediate relapse (the TRIM↔RAISE flip-flop that left fps at
+     * 42–55 for ~90 s in the field log).
+     */
+    private sealed interface Lockout {
+        data class Watching(val roughStreak: Int = 0) : Lockout
+        data class Locked(val smoothStreak: Int, val raised: Set<Int>) : Lockout
+    }
 
     /** Which clock domain is the bottleneck — protected from trimming, prioritized for raising. */
     private enum class Bottleneck { NONE, CPU, GPU }
@@ -147,10 +158,10 @@ class AutoTuneController(
     }
 
     /** True while the prime cores are offlined (for the overlay readout). */
-    val isPrimeParked: Boolean get() = primeParked
+    val isPrimeParked: Boolean get() = park is PrimePark.Parked
 
     /** True while the prime-walled settle is latched (fps target confirmed unreachable) — for the diagnostic log. */
-    val isPrimeWalled: Boolean get() = primeBoundLatched
+    val isPrimeWalled: Boolean get() = primeWall.latched
 
     /** How many domains are currently judged content-capped (raising them didn't move fps) — for the log. */
     val stalledDomainCount: Int get() = raiseStalled.size
@@ -190,9 +201,7 @@ class AutoTuneController(
         reprobeCounter = 0
         gpuIdleStreak = 0
         steadyCount = 0
-        primeParked = false
-        parkSteady = 0
-        parkCooldown = 0
+        park = PrimePark.Online()
         parkHurtCount = 0
         sessionSettled = false
         notRenderingStreak = 0
@@ -200,19 +209,14 @@ class AutoTuneController(
         gpuBusyPct = -1
         cpuBusyPct = -1
         drawWEma = -1f
-        primeBoundStreak = 0
-        primeBoundReleaseStreak = 0
-        primeBoundLatched = false
+        primeWall = PrimeWallLatch()
         powerCooldown = 0
-        troubleStreak = 0
-        recoverStreak = 0
-        jankLocked = false
+        lockout = Lockout.Watching()
         harvestCooldown = 0
         frameTimeTailMs = -1f
         tailEma = 0f
         marginOverStreak = 0
         lastGoodCaps.clear()
-        lockRaised.clear()
         // Note: powerModel is intentionally preserved (it carries across sessions/apps).
     }
 
@@ -361,14 +365,16 @@ class AutoTuneController(
         lastTrimPolicy = null
         wBeforeTrim = null
         bottleneck = Bottleneck.NONE
-        if (primeParked) {
-            setCoresOnline(primeCores(policies), true)
-            primeParked = false
-            parkSteady = 0
+        val online = when (val p = park) {
+            is PrimePark.Parked -> {
+                setCoresOnline(primeCores(policies), true)
+                PrimePark.Online()
+            }
+            is PrimePark.Online -> p
         }
+        park = if (sustained) online.copy(cooldown = 0) else online
         if (sustained) {
             sessionSettled = false
-            parkCooldown = 0
             parkHurtCount = 0
         }
     }
@@ -398,26 +404,27 @@ class AutoTuneController(
         if (cores.isEmpty()) return
         val thermal = (cpuTempC ?: 0) >= THERMAL_C || (gpuTempC ?: 0) >= THERMAL_C
         val holding = fps >= targetFps * TARGET_HYST_LO // at/above target (works under a frame cap)
-        if (primeParked) {
-            val hurt = !holding // parking cost frames ⇒ the prime was needed after all
-            val unpark = !aggressivePark || thermal || targetFps <= 0 ||
-                hurt || jank > jankAtPark + JANK_TOL || action == Action.RAISE
-            if (unpark) {
+        val online = when (val p = park) {
+            is PrimePark.Parked -> {
+                val hurt = !holding // parking cost frames ⇒ the prime was needed after all
+                val unpark = !aggressivePark || thermal || targetFps <= 0 ||
+                    hurt || jank > p.jankAtPark + JANK_TOL || action == Action.RAISE
+                if (!unpark) return
                 setCoresOnline(cores, true)
-                primeParked = false
-                parkSteady = 0
-                if (hurt) {
+                park = if (hurt) {
                     // A game that keeps needing the prime gets an ever-longer re-park cooldown, so the
                     // dip-on-unpark stops recurring (bursty emulators) instead of flapping every minute.
                     parkHurtCount++
-                    parkCooldown = (PARK_COOLDOWN_TICKS * parkHurtCount).coerceAtMost(PARK_COOLDOWN_MAX)
+                    PrimePark.Online(cooldown = (PARK_COOLDOWN_TICKS * parkHurtCount).coerceAtMost(PARK_COOLDOWN_MAX))
+                } else {
+                    PrimePark.Online()
                 }
+                return
             }
-            return
+            is PrimePark.Online -> p
         }
-        if (parkCooldown > 0) {
-            parkCooldown--
-            parkSteady = 0
+        if (online.cooldown > 0) {
+            park = PrimePark.Online(cooldown = online.cooldown - 1)
             return
         }
         val prime = trimOrder(policies).firstOrNull { !it.isGpu }
@@ -430,12 +437,12 @@ class AutoTuneController(
         val eligible = aggressivePark && steady && targetFps > 0 && !thermal && sessionSettled &&
             bottleneck != Bottleneck.CPU && primeNotPegged &&
             holding && jank <= PARK_JANK_MAX && primeAtFloor
-        parkSteady = if (eligible) parkSteady + 1 else 0
-        if (parkSteady >= PARK_TICKS) {
+        val streak = if (eligible) online.eligibleStreak + 1 else 0
+        park = if (streak >= PARK_TICKS) {
             setCoresOnline(cores, false)
-            primeParked = true
-            jankAtPark = jank
-            parkSteady = 0
+            PrimePark.Parked(jankAtPark = jank)
+        } else {
+            PrimePark.Online(eligibleStreak = streak)
         }
     }
 
@@ -485,7 +492,7 @@ class AutoTuneController(
         // core PEGGED (the vendor-floored prime gating each frame), and the GPU has headroom (so it's not GPU-
         // bound: raising the GPU wouldn't help). Key off the RAW pegged-core + GPU-headroom signals, NOT the
         // aggregate bottleneck label (it flickers CPU/GPU/NONE on this noisy signal and never let the latch
-        // build). Engage after [PRIME_BOUND_CONFIRM] such ticks; RELEASE only after [PRIME_BOUND_RELEASE] ticks
+        // build). Engage after [PrimeWallLatch.CONFIRM] such ticks; RELEASE only after [PrimeWallLatch.RELEASE] ticks
         // of genuinely reaching the FULL target (a lone 58-fps near-miss must NOT release it — that flutter was
         // the bug). Once latched the settle below outranks the recovery lockout, which otherwise fires forever on
         // a chronically-rough prime-walled game (jankEma ≫ LOCK_JANK) and pumps heat raising clocks that can't
@@ -502,17 +509,7 @@ class AutoTuneController(
         // stricter "actually maxed" bar or it strangles a cool 5 W / 44 °C mid-range game into GPU oscillation.
         val primeWalled = wattCapAndSettleEnabled &&
             below && cpuCorePeakPct >= CPU_CORE_WALL && gpuBusyPct in 0 until BOUND_THRESHOLD
-        if (primeWalled) {
-            primeBoundStreak = (primeBoundStreak + 1).coerceAtMost(PRIME_BOUND_CONFIRM)
-            if (primeBoundStreak >= PRIME_BOUND_CONFIRM) primeBoundLatched = true
-            primeBoundReleaseStreak = 0
-        } else if (reachedTarget) {
-            primeBoundReleaseStreak++
-            if (primeBoundReleaseStreak >= PRIME_BOUND_RELEASE) {
-                primeBoundLatched = false
-                primeBoundStreak = 0
-            }
-        } // else: below target but GPU-bound / flicker — preserve both streaks
+        primeWall = primeWall.next(primeWalled, reachedTarget)
         // Absolute thermal trip (last resort): shed heat ANY way, including the maybe-no-op prime — ignoring
         // edges AND learned floors (a floor pinned while chasing must not block the safety trim).
         if ((cpuTempC ?: 0) >= HARD_THERMAL_C || (gpuTempC ?: 0) >= HARD_THERMAL_C) {
@@ -544,7 +541,7 @@ class AutoTuneController(
         // raise oscillation. When we've confirmed the wall AND the GPU isn't currently the bottleneck, just hold
         // (harvest the idle GPU) and let the thermal/power ceilings above shed heat. If the GPU IS saturated this
         // tick (a GPU-heavy moment), fall through so the normal logic can raise the real bottleneck.
-        if (primeBoundLatched && gpuBusyPct in 0 until BOUND_THRESHOLD) {
+        if (primeWall.latched && gpuBusyPct in 0 until BOUND_THRESHOLD) {
             return primeBoundSettle(policies, fps, jank, steady)
         }
         // Genuine stall (loading spike / very heavy scene): restore clocks fast and re-learn floors fresh.
@@ -575,24 +572,25 @@ class AutoTuneController(
         // the harvest path and isn't mistaken for a clock-starved game. Triggering on fps-below-target alone
         // would conflate the two and pin clocks chasing an unreachable rate.
         val rough = jank >= LOCK_JANK
-        if (jankLocked) {
-            recoverStreak = if (rough) 0 else recoverStreak + 1
-            if (recoverStreak < LOCK_RECOVER_TICKS) {
-                lastTrimPolicy = null
-                return if (recoverRaise(policies)) Action.RAISE else Action.HOLD
+        when (val lock = lockout) {
+            is Lockout.Locked -> {
+                val smoothStreak = if (rough) 0 else lock.smoothStreak + 1
+                if (smoothStreak < LOCK_RECOVER_TICKS) {
+                    lastTrimPolicy = null
+                    return recoverStep(policies, lock.copy(smoothStreak = smoothStreak))
+                }
+                lock.raised.forEach { id -> capPercent[id]?.let { domainFloor[id] = maxOf(domainFloor[id] ?: 0, it) } }
+                lockout = Lockout.Watching()
+                harvestCooldown = LOCK_COOLDOWN_TICKS
+                // fall through into the normal logic; the cooldown suppresses trims for the next few ticks
             }
-            lockRaised.forEach { id -> capPercent[id]?.let { domainFloor[id] = maxOf(domainFloor[id] ?: 0, it) } }
-            lockRaised.clear()
-            jankLocked = false
-            troubleStreak = 0
-            harvestCooldown = LOCK_COOLDOWN_TICKS
-            // fall through into the normal logic; the cooldown suppresses trims for the next few ticks
-        } else {
-            troubleStreak = if (rough) troubleStreak + 1 else 0
-            if (troubleStreak >= LOCK_ENTER_TICKS) {
-                enterLockout(policies)
-                lastTrimPolicy = null
-                return if (recoverRaise(policies)) Action.RAISE else Action.HOLD
+            is Lockout.Watching -> {
+                val roughStreak = if (rough) lock.roughStreak + 1 else 0
+                if (roughStreak >= LOCK_ENTER_TICKS) {
+                    lastTrimPolicy = null
+                    return recoverStep(policies, enterLockout(policies))
+                }
+                lockout = Lockout.Watching(roughStreak)
             }
         }
         // Smoothness rail: if the last trim worsened frame pacing, undo it, freeze it, and raise its floor.
@@ -852,45 +850,41 @@ class AutoTuneController(
      * Climb out of a sustained stutter by raising the limiter — the **saturated GPU first** (when gpuBusy is
      * pegged), exactly the case a hot-thread bn=CPU used to mis-serve by feeding the CPU while the GPU sat
      * starved; otherwise the normal bottleneck-first order. Content-cap latches are ignored here (a stutter
-     * means they may be stale). Records what it raised so the floor can be pinned on recovery; returns false
-     * once everything is already maxed (a genuinely too-heavy scene — hold at full clocks until it eases).
+     * means they may be stale). Records what it raised in [locked] so the floor can be pinned on recovery;
+     * HOLDs once everything is already maxed (a genuinely too-heavy scene — hold at full clocks until it eases).
      */
-    private fun recoverRaise(policies: List<CpuPolicyInfo>): Boolean {
+    private fun recoverStep(policies: List<CpuPolicyInfo>, locked: Lockout.Locked): Action {
         val gpu = policies.firstOrNull { it.isGpu }
-        if (gpu != null && gpuBusyPct >= BOUND_THRESHOLD && (capPercent[gpu.id] ?: 100) < 100) {
+        val raised = if (gpu != null && gpuBusyPct >= BOUND_THRESHOLD && (capPercent[gpu.id] ?: 100) < 100) {
             raiseOne(policies, gpu.id)
-            lockRaised.add(gpu.id)
-            return true
+            gpu.id
+        } else {
+            raiseNext(policies)
         }
-        val raised = raiseNext(policies)
-        if (raised != null) {
-            lockRaised.add(raised)
-            return true
-        }
-        return false
+        lockout = if (raised != null) locked.copy(raised = locked.raised + raised) else locked
+        return if (raised != null) Action.RAISE else Action.HOLD
     }
 
     /**
      * Engage the recovery lockout: **snap the caps up to the last smooth operating point** in one move
      * (undoes a multi-notch over-harvest that crept into a stutter; never snaps *down*, since a heavier
-     * scene needs more, not less — [recoverRaise] climbs from there). A stutter invalidates the harvest
+     * scene needs more, not less — [recoverStep] climbs from there). A stutter invalidates the harvest
      * assumptions, so edges, content-cap latches and any pending probe are cleared too.
      */
-    private fun enterLockout(policies: List<CpuPolicyInfo>) {
-        jankLocked = true
-        recoverStreak = 0
-        lockRaised.clear()
+    private fun enterLockout(policies: List<CpuPolicyInfo>): Lockout.Locked {
+        val snapped = HashSet<Int>()
         for (p in policies) {
             val good = lastGoodCaps[p.id] ?: continue
             if (good > (capPercent[p.id] ?: 100)) {
                 capPercent[p.id] = good
-                lockRaised.add(p.id)
+                snapped.add(p.id)
             }
         }
         edged.clear()
         raiseStalled.clear()
         raiseStallStreak.clear()
         pendingRaise = null
+        return Lockout.Locked(smoothStreak = 0, raised = snapped)
     }
 
     private fun raiseAll(policies: List<CpuPolicyInfo>): Boolean {
@@ -976,12 +970,12 @@ class AutoTuneController(
 
     /** Reopen caps to full, re-online the prime cores, and restore stock writability for the restore. */
     fun release(policies: List<CpuPolicyInfo>) {
-        // Defense in depth: re-online the prime cluster UNCONDITIONALLY (not gated on the primeParked
-        // flag) so a stale/false flag can never strand cores offline. Onlining already-online cores is a
+        // Defense in depth: re-online the prime cluster UNCONDITIONALLY (not gated on the [park] state)
+        // so a stale state can never strand cores offline. Onlining already-online cores is a
         // harmless no-op. runCatching so a failed write can't skip the cap-release + reset below.
         val cores = primeCores(policies)
         if (cores.isNotEmpty()) runCatching { setCoresOnline(cores, true) }
-        primeParked = false
+        park = PrimePark.Online()
         for (p in policies) capPercent[p.id] = 100
         if (policies.isNotEmpty()) releaseCaps(policies)
         reset()
@@ -1022,8 +1016,6 @@ class AutoTuneController(
         private const val DRAW_ALPHA = 0.4f // EMA weight on live draw for the power ceiling (smooth out spikes)
         private const val POWER_RAISE_FRAC = 0.95f // don't raise clocks once draw is within 5% of the ceiling
         private const val POWER_COOLDOWN_TICKS = 4 // suppress chase-raises this many ticks after the cap fired
-        private const val PRIME_BOUND_CONFIRM = 3 // prime-bound below-target ticks before the settle latches on
-        private const val PRIME_BOUND_RELEASE = 3 // reach-target/shift ticks before it releases (engage-fast/release-slow)
 
         const val CPU_MIN_PERCENT = 35
         const val GPU_MIN_PERCENT = 40 // responsive gaming floor (keeps ramp headroom)

@@ -1,8 +1,7 @@
 package com.kei.pulse.model
 
 data class TunerState(
-    val isLoading: Boolean = true,
-    val isPServerAvailable: Boolean = false,
+    val link: DeviceLink = DeviceLink.SCANNING,
     val policies: List<CpuPolicyInfo> = emptyList(),
     val actualValues: Map<Int, Int> = emptyMap(),
     val currentValues: Map<Int, Int> = emptyMap(),
@@ -20,3 +19,6 @@ data class TunerState(
     val statusMessage: String? = null,
     val errorMessage: String? = null,
 )
+
+/** Where the app stands with the device's PServer: still scanning, not supported, or linked and tunable. */
+enum class DeviceLink { SCANNING, UNSUPPORTED, LINKED }

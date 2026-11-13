@@ -34,15 +34,16 @@ import com.kei.pulse.root.RootSupport
  */
 class RgbController(context: Context? = null) {
 
+    /** The user's pre-PULSE LED color + brightness; a field is null when the key had no value. */
+    private data class LedOriginal(val color: String?, val brightness: String?)
+
     // The user's TRUE pre-PULSE color + brightness, persisted so they survive a process death: captured the
     // first time PULSE writes over a NON-PULSE color, and [off] restores them even if THIS process never wrote
     // the LED (e.g. a crash mid-session). Null context (unit tests) ⇒ in-memory only, as before.
     private val prefs: SharedPreferences? = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     @Volatile private var availableCached: Boolean? = null
-    @Volatile private var captured = false
-    @Volatile private var savedColor: String? = null
-    @Volatile private var savedBrightness: String? = null
+    @Volatile private var original: LedOriginal? = null // null until captured (in-process or from [prefs])
     @Volatile private var brightnessLevel: Float? = null
     @Volatile private var lastWritten: String? = null
     @Volatile private var lastWriteMs: Long = 0L
@@ -64,23 +65,24 @@ class RgbController(context: Context? = null) {
 
     /** Remember the user's pre-PULSE color + brightness once, so [off] can restore them. */
     private fun captureOriginal() {
-        if (captured) return
-        captured = true
+        if (original != null) return
         val current = RootSupport.runRootCommand("settings get system $KEY_COLOR")?.trim()?.takeIf { it != "null" }
         // If the LED currently shows PULSE's OWN last-written color (we restarted/crashed while driving it),
         // keep the persisted true original instead of capturing PULSE's leftover as if it were the user's.
         if (prefs?.getBoolean(PREF_DONE, false) == true && current != null && current == prefs.getString(PREF_LAST, null)) {
-            savedColor = prefs.getString(PREF_ORIG_COLOR, null)
-            savedBrightness = prefs.getString(PREF_ORIG_BRIGHT, null)
+            original = persistedOriginal(prefs)
             return
         }
         // Genuine pre-PULSE state (first use, or the user changed it while PULSE was off) — THIS is the original.
-        savedColor = current
-        savedBrightness = RootSupport.runRootCommand("settings get system $KEY_BRIGHTNESS")?.trim()?.takeIf { it != "null" }
+        val captured = LedOriginal(
+            color = current,
+            brightness = RootSupport.runRootCommand("settings get system $KEY_BRIGHTNESS")?.trim()?.takeIf { it != "null" },
+        )
+        original = captured
         prefs?.edit()
             ?.putBoolean(PREF_DONE, true)
-            ?.putString(PREF_ORIG_COLOR, savedColor)
-            ?.putString(PREF_ORIG_BRIGHT, savedBrightness)
+            ?.putString(PREF_ORIG_COLOR, captured.color)
+            ?.putString(PREF_ORIG_BRIGHT, captured.brightness)
             ?.apply()
     }
 
@@ -114,6 +116,9 @@ class RgbController(context: Context? = null) {
         writeColorPair("${scaledHex(leftColor, leftBrightness)},${scaledHex(rightColor, rightBrightness)}", "setManual")
     }
 
+    private fun persistedOriginal(prefs: SharedPreferences) =
+        LedOriginal(prefs.getString(PREF_ORIG_COLOR, null), prefs.getString(PREF_ORIG_BRIGHT, null))
+
     private fun writeColorPair(colorPair: String, tag: String) {
         val now = System.currentTimeMillis()
         // Re-assert an unchanged color on a slow cadence so we RECOVER if a stock RGB effect overran us (it
@@ -133,18 +138,16 @@ class RgbController(context: Context? = null) {
         if (!available()) return
         // If THIS process never captured (PULSE wrote the LED then died before [off]), pull the persisted true
         // original so we still hand the LEDs back instead of stranding them on PULSE's color.
-        if (!captured) {
+        val restore = original ?: run {
             if (prefs?.getBoolean(PREF_DONE, false) != true) return // never captured anywhere — nothing to restore
-            captured = true
-            savedColor = prefs.getString(PREF_ORIG_COLOR, null)
-            savedBrightness = prefs.getString(PREF_ORIG_BRIGHT, null)
+            persistedOriginal(prefs).also { original = it }
         }
         val cmds = buildList {
-            savedColor?.let { add("settings put system $KEY_COLOR '$it'") }
-            savedBrightness?.let { add("settings put system $KEY_BRIGHTNESS '$it'") }
+            restore.color?.let { add("settings put system $KEY_COLOR '$it'") }
+            restore.brightness?.let { add("settings put system $KEY_BRIGHTNESS '$it'") }
         }
         if (cmds.isNotEmpty()) RootSupport.runRootCommand(cmds.joinToString("; "))
-        android.util.Log.d(TAG, "off → color=${savedColor ?: "—"} bright=${savedBrightness ?: "—"}")
+        android.util.Log.d(TAG, "off → color=${restore.color ?: "—"} bright=${restore.brightness ?: "—"}")
         brightnessLevel = null
         lastWritten = null
     }

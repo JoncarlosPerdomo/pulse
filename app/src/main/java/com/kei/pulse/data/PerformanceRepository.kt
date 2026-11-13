@@ -5,6 +5,7 @@ import com.kei.pulse.model.PerformanceProfile
 import com.kei.pulse.model.PowerTier
 import com.kei.pulse.model.ProfileStateResolver
 import com.kei.pulse.model.ProfileSource
+import com.kei.pulse.model.DeviceLink
 import com.kei.pulse.model.TunerState
 import com.kei.pulse.root.PerformanceCommandBuilder
 import com.kei.pulse.root.RootCommandRunner
@@ -143,8 +144,7 @@ class PerformanceRepository(
                 emit(
                     ProfileStateResolver.resolve(
                         TunerState(
-                            isLoading = false,
-                            isPServerAvailable = rootCommandRunner.isAvailable,
+                            link = if (rootCommandRunner.isAvailable) DeviceLink.LINKED else DeviceLink.UNSUPPORTED,
                             policies = policies,
                             actualValues = actualValues,
                             currentValues = mergeValues(policies, defaultValues, storage.lastValues),

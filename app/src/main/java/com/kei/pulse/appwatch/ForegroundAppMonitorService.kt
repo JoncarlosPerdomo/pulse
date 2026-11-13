@@ -56,20 +56,17 @@ import com.kei.pulse.model.PowerTier
 import com.kei.pulse.model.ProfileStateResolver
 import com.kei.pulse.model.RgbMode
 import com.kei.pulse.overlay.AutoTdpReadout
+import com.kei.pulse.overlay.BatteryReadout
 import com.kei.pulse.overlay.ClusterReadout
 import com.kei.pulse.overlay.OverlayConfig
 import com.kei.pulse.overlay.OverlayStats
+import com.kei.pulse.overlay.PlaySession
 import com.kei.pulse.overlay.PerformanceOverlay
 import com.kei.pulse.overlay.QuickAccessAction
 import com.kei.pulse.overlay.QuickAccessActions
 import com.kei.pulse.overlay.QuickAccessOverlay
 import com.kei.pulse.overlay.QuickAccessPerApp
 import com.kei.pulse.overlay.QuickAccessScope
-import com.kei.pulse.overlay.MINUTES_SMOOTH_ALPHA
-import com.kei.pulse.overlay.batteryMinutesLeft
-import com.kei.pulse.overlay.batteryMinutesToFull
-import com.kei.pulse.overlay.displayMinutes
-import com.kei.pulse.overlay.smoothMinutes
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -460,26 +457,15 @@ class ForegroundAppMonitorService : Service() {
     private var overlayPolicies: List<CpuPolicyInfo> = emptyList()
     private var overlaySoc: String? = null
     private var overlayProfileLabel: String = ""
-    private var overlayDrawEma: Float? = null
-    // Smoothed charge rate (W into the battery) while plugged in — kept separate from the discharge EMA so the
-    // two never cross-contaminate across a plug/unplug. Each branch of overlayPower nulls the other.
-    private var overlayChargeEma: Float? = null
-    // Slow EMA of the battery time-left/time-to-full MINUTES (output-domain smoothing): capacity/draw turns
-    // draw jitter into big jumps, so the displayed minutes are EMA'd + quantized. Re-seeds on a plug/unplug
-    // (the two regimes have different magnitudes).
-    private var overlayMinutesEma: Float? = null
-    private var overlayMinutesDischarging: Boolean? = null
+    private var batteryReadout = BatteryReadout()
     // Full-battery energy (Wh) for the overlay's "LEFT" estimate. Constant, so it's cached on the first
     // successful read; a null (transient PServer-not-ready) just retries next poll rather than latching dead.
     private var overlayCapacityWh: Float? = null
-    // Overlay session timer: accumulates foreground play time for the current bound game and
-    // resumes (does not reset) when you minimize and return; only a different game resets it.
-    private var sessionPackage: String? = null
-    private var sessionAccumulatedMs: Long = 0L
-    private var sessionResumeAt: Long = 0L
+    private var playSession = PlaySession()
     @Volatile private var overlayLocked = true
     private var pollJob: Job? = null
-    private var lastForeground: String? = null
+    private var foregroundState = ForegroundState()
+    private val lastForeground: String? get() = foregroundState.confirmed
     @Volatile
     private var boundPackage: String? = null
     @Volatile
@@ -506,10 +492,6 @@ class ForegroundAppMonitorService : Service() {
     // the battery/telemetry nodes again. Null when tick() didn't read this tick (overlay + AutoTDP both off);
     // consumers then fall back to their own cheap read so behavior in that case is unchanged.
     @Volatile private var tickTelemetry: TelemetrySnapshot? = null
-    // Debounce state: a newly-seen foreground package must be observed on two consecutive polls
-    // before we act on it (see pollLoop).
-    private var candidatePackage: String? = null
-    private var candidateConfirmCount = 0
     // Current foreground package, used to drive a standalone overlay (no per-app binding).
     private var overlayForeground: String? = null
 
@@ -636,8 +618,8 @@ class ForegroundAppMonitorService : Service() {
                 if (foreground != null && cfg != null) {
                     boundPackage = foreground
                     boundConfig = cfg
-                    lastForeground = foreground
-                    startOrResumeSession(foreground)
+                    foregroundState = ForegroundState(confirmed = foreground)
+                    playSession = playSession.resume(foreground, System.currentTimeMillis())
                     // Resume an AutoTDP binding without re-snapshotting (boundPackage is already set, so
                     // the pre-crash restore snapshot stands).
                     if (PerAppConfig.isAuto(cfg.profileBinding)) startAutoTdp(foreground, cfg)
@@ -694,28 +676,9 @@ class ForegroundAppMonitorService : Service() {
             }
             val foreground = currentForegroundPackage()
             overlayForeground = foreground
-            if (foreground != null && foreground != lastForeground) {
-                // Debounce: a game's foreground package can flap with overlays/splash activities,
-                // and acting on a single sample causes apply->restore thrash. Require the new
-                // package to persist across two consecutive polls (~1.5s extra latency) before
-                // switching bound state.
-                if (foreground == candidatePackage) {
-                    candidateConfirmCount++
-                } else {
-                    candidatePackage = foreground
-                    candidateConfirmCount = 1
-                }
-                if (candidateConfirmCount >= 2) {
-                    lastForeground = foreground
-                    candidatePackage = null
-                    candidateConfirmCount = 0
-                    handleForegroundChange(foreground)
-                }
-            } else if (foreground == lastForeground) {
-                // Settled back on the current foreground — drop any pending candidate.
-                candidatePackage = null
-                candidateConfirmCount = 0
-            }
+            val previousForeground = lastForeground
+            foregroundState = ForegroundDebounce.next(foregroundState, foreground)
+            lastForeground?.takeIf { it != previousForeground }?.let { handleForegroundChange(it) }
             try {
                 tick() // reads telemetry once (when active) and caches it for the draw-tracker + RGB below
                 trackDrawForBoundApp()
@@ -805,7 +768,10 @@ class ForegroundAppMonitorService : Service() {
             }
             when {
                 overlayShouldShow && !overlay.isShowing -> { showOverlay(settings); stats?.let { overlay.update(it) } }
-                overlayShouldShow -> stats?.let { overlay.update(it) }
+                overlayShouldShow -> {
+                    overlay.applyLayout(settings)
+                    stats?.let { overlay.update(it) }
+                }
                 overlay.isShowing -> hideOverlay()
             }
             // Show the handle unless the user hid it AND has a combo to open it with (else they'd be locked out).
@@ -1238,30 +1204,23 @@ class ForegroundAppMonitorService : Service() {
         includeSystemLevels: Boolean = false,
         policies: List<CpuPolicyInfo> = emptyList(),
     ): OverlayStats {
-        val (powerW, isCharging) = overlayPower(telemetry)
-        // Battery readout: on battery = time-LEFT from the smoothed draw; plugged in = time-to-FULL from the
-        // smoothed charge rate (= powerW while charging). Capacity is read once. Unknown/tiny cases → null → "—".
         if (overlayCapacityWh == null) overlayCapacityWh = com.kei.pulse.data.BatteryReader.capacityWh()
-        val rawMinutes = if (telemetry.isDischarging) {
-            batteryMinutesLeft(overlayCapacityWh, telemetry.batteryPercent, overlayDrawEma, discharging = true)
-        } else {
-            batteryMinutesToFull(overlayCapacityWh, telemetry.batteryPercent, chargeWatts = powerW)
-        }
-        // Smooth the displayed minutes so they don't jump around (capacity/draw amplifies draw jitter). Re-seed
-        // the EMA across a plug/unplug since time-left and time-to-full are different magnitudes.
-        if (telemetry.isDischarging != overlayMinutesDischarging) overlayMinutesEma = null
-        overlayMinutesDischarging = telemetry.isDischarging
-        overlayMinutesEma = smoothMinutes(overlayMinutesEma, rawMinutes, MINUTES_SMOOTH_ALPHA)
-        val minutesLeft = displayMinutes(overlayMinutesEma)
+        // While plugged in, batteryDrawW is |current_now| × voltage_now = the charge rate INTO the battery.
+        batteryReadout = batteryReadout.next(
+            discharging = telemetry.isDischarging,
+            sampleW = telemetry.batteryDrawW,
+            capacityWh = overlayCapacityWh,
+            batteryPercent = telemetry.batteryPercent,
+        )
         return OverlayStats(
             telemetry = telemetry,
             fps = fps,
-            sessionElapsedMs = sessionElapsedMs(),
+            sessionElapsedMs = playSession.elapsedMs(System.currentTimeMillis()),
             socModel = overlaySoc,
             profileLabel = overlayProfileLabel,
-            powerDrawW = powerW,
-            powerIsCharging = isCharging,
-            minutesLeft = minutesLeft,
+            powerDrawW = batteryReadout.powerW,
+            powerIsCharging = !telemetry.isDischarging,
+            minutesLeft = batteryReadout.minutes,
             autoTdp = auto,
             // Only the Quick Access System sliders consume these — don't pay the reads on OSD-only sessions.
             brightnessPercent = if (includeSystemLevels) readBrightnessPercent() else null,
@@ -1636,57 +1595,13 @@ class ForegroundAppMonitorService : Service() {
         )
     }
 
-    // ── Overlay session timer (accumulates foreground play time; resumes on return) ──
-    private fun startOrResumeSession(pkg: String) {
-        if (sessionPackage != pkg) {
-            sessionPackage = pkg
-            sessionAccumulatedMs = 0L
-        }
-        sessionResumeAt = System.currentTimeMillis()
-    }
-
-    private fun pauseSession() {
-        if (sessionResumeAt > 0L) {
-            sessionAccumulatedMs += System.currentTimeMillis() - sessionResumeAt
-            sessionResumeAt = 0L
-        }
-    }
-
-    private fun sessionElapsedMs(): Long =
-        sessionAccumulatedMs + if (sessionResumeAt > 0L) System.currentTimeMillis() - sessionResumeAt else 0L
-
-    /**
-     * Overlay power readout: on battery, an EMA-smoothed measured system draw (kills the per-sample
-     * 0.1 W flicker); while charging current_now is charger current, not draw, so fall back to a
-     * load-scaled estimate at the current ceilings (flagged so the overlay shows ⚡).
-     */
-    private fun overlayPower(t: TelemetrySnapshot): Pair<Float?, Boolean> {
-        if (t.isDischarging) {
-            overlayChargeEma = null
-            val w = t.batteryDrawW ?: return overlayDrawEma to false
-            val ema = overlayDrawEma?.let { it * 0.7f + w * 0.3f } ?: w
-            overlayDrawEma = ema
-            return ema to false // false = on battery (system draw)
-        }
-        // Plugged in: batteryDrawW is now |current_now| × voltage_now = the charge rate INTO the battery
-        // (the kernel reports the charge current while charging). Show that, smoothed; true ⇒ overlay shows ⚡.
-        overlayDrawEma = null
-        val w = t.batteryDrawW ?: return overlayChargeEma to true
-        val ema = overlayChargeEma?.let { it * 0.7f + w * 0.3f } ?: w
-        overlayChargeEma = ema
-        return ema to true
-    }
-
     private fun hideOverlay() {
         overlay.hide()
-        overlayDrawEma = null
-        overlayChargeEma = null
-        overlayMinutesEma = null
-        overlayMinutesDischarging = null
+        batteryReadout = BatteryReadout()
         overlayProfileLabel = ""
         // Policies are kept (stable, and AutoTDP may still need them); FPS is stopped by the caller
         // when the game is truly gone. The session timer is NOT reset here — it pauses on leaving
-        // the game and resumes when the same game returns (see startOrResumeSession / pauseSession).
+        // the game and resumes when the same game returns (see [PlaySession]).
     }
 
     /**
@@ -1802,14 +1717,14 @@ class ForegroundAppMonitorService : Service() {
                     }
                     boundPackage = foreground
                     boundConfig = config
-                    startOrResumeSession(foreground)
+                    playSession = playSession.resume(foreground, System.currentTimeMillis())
                 }
                 !engages && boundPackage != null -> {
                     // Left the bound app for a neutral one (PULSE itself or the home screen), so the
                     // tuner always shows (and edits) the general OS state, never a game's.
                     val wasExplicit = boundConfig != null
                     persistMeasuredDraw() // final draw stats write for the session
-                    pauseSession() // accrue play time; resumes if the user returns to this game
+                    playSession = playSession.pause(System.currentTimeMillis()) // resumes if the user returns to this game
                     stopAutoTdp() // reopen clocks before restoring the pre-game snapshot
                     clearBoundReassert() // Bug 9: stop holding caps + hand their locks back to stock before restore
                     restoreSnapshot(notify = wasExplicit) // stay quiet for global-default switches

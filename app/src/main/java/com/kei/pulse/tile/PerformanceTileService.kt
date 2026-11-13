@@ -18,6 +18,7 @@ import com.kei.pulse.model.AppSettings
 import com.kei.pulse.model.PowerTier
 import com.kei.pulse.model.ProfileStateResolver
 import com.kei.pulse.model.TileInteractionBehavior
+import com.kei.pulse.model.DeviceLink
 import com.kei.pulse.model.TunerState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -111,7 +112,7 @@ class PerformanceTileService : TileService() {
     )
 
     private fun buildTilePresentation(state: TunerState, settings: AppSettings): TilePresentation {
-        if (!state.isPServerAvailable) {
+        if (state.link != DeviceLink.LINKED) {
             return TilePresentation(
                 label = getString(R.string.tile_title),
                 subtitle = getString(R.string.tile_state_unavailable),
@@ -134,7 +135,7 @@ class PerformanceTileService : TileService() {
     }
 
     private fun buildTileVisualState(state: TunerState): Int {
-        if (!state.isPServerAvailable) return Tile.STATE_INACTIVE
+        if (state.link != DeviceLink.LINKED) return Tile.STATE_INACTIVE
         val activeProfileId = effectiveTileProfileId(state)
         val activeName = effectiveTileProfileName(state)
         val stockIsActive = activeProfileId == ProfileStateResolver.STOCK_PROFILE_ID || activeName == "Stock"

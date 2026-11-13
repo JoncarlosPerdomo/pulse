@@ -43,8 +43,6 @@ class QuickAccessOverlay(private val context: Context) {
     // emits without a suspending collector (the panel subscribes while expanded).
     private val navIntents = MutableSharedFlow<QuickAccessNavIntent>(extraBufferCapacity = 32)
 
-    private var host: OverlayViewHost? = null
-    private var params: WindowManager.LayoutParams? = null
     private var actions: QuickAccessActions = QuickAccessActions { }
     // HAT-axis D-pad edge detection: these handhelds report the D-pad as ABS_HAT0X/Y (a MotionEvent axis),
     // NOT KEYCODE_DPAD — confirmed by getevent on the Odin (M7). The generic-motion listener translates the hat
@@ -52,13 +50,17 @@ class QuickAccessOverlay(private val context: Context) {
     // (0) event is ignored. Reset on each expand.
     private var lastHatX = 0
     private var lastHatY = 0
-    // An expand requested before the window exists (the combo can fire ahead of the poll tick that calls
-    // show()). Timestamped so a stale request can't pop the panel much later; honored by show().
-    private var pendingExpandAtMs: Long? = null
-
     @Volatile
-    var isShowing = false
-        private set
+    private var window: WindowState = WindowState.Hidden()
+
+    val isShowing: Boolean get() = window is WindowState.Shown
+
+    private sealed interface WindowState {
+        /** No window. [expandRequestedAtMs]: the combo fired before [show] created one (it can beat the poll
+         *  tick); timestamped so a stale request can't pop the panel much later. */
+        data class Hidden(val expandRequestedAtMs: Long? = null) : WindowState
+        class Shown(val overlay: AttachedOverlay) : WindowState
+    }
 
     fun update(stats: OverlayStats) { statsFlow.value = stats }
     fun updateSettings(settings: AppSettings) { settingsFlow.value = settings }
@@ -76,7 +78,7 @@ class QuickAccessOverlay(private val context: Context) {
         this.actions = actions
         settingsFlow.value = settings
         main.post {
-            if (host != null) return@post
+            if (window is WindowState.Shown) return@post
             if (!hasPermission(context)) return@post
             val wm = windowManager ?: return@post
             val newHost = OverlayViewHost(context)
@@ -144,13 +146,8 @@ class QuickAccessOverlay(private val context: Context) {
             val added = runCatching { wm.addView(newHost.composeView, lp) }.isSuccess
             if (!added) { newHost.onDestroyed(); return@post }
             newHost.onResumed()
-            host = newHost
-            params = lp
-            isShowing = true
-            // Honor a combo press that landed before the window existed (recent only — a stale request
-            // must not pop the panel out of nowhere).
-            val pending = pendingExpandAtMs
-            pendingExpandAtMs = null
+            val pending = (window as? WindowState.Hidden)?.expandRequestedAtMs
+            window = WindowState.Shown(AttachedOverlay(newHost, lp))
             if (pending != null && System.currentTimeMillis() - pending <= PENDING_EXPAND_MAX_AGE_MS) {
                 setExpanded(true)
             }
@@ -159,38 +156,35 @@ class QuickAccessOverlay(private val context: Context) {
 
     fun hide() {
         main.post {
-            host?.let { h ->
-                runCatching { windowManager?.removeView(h.composeView) }
-                h.onDestroyed()
+            (window as? WindowState.Shown)?.overlay?.let { w ->
+                runCatching { windowManager?.removeView(w.host.composeView) }
+                w.host.onDestroyed()
             }
-            host = null
-            params = null
-            isShowing = false
+            window = WindowState.Hidden()
             expandedFlow.value = false
-            pendingExpandAtMs = null
         }
     }
 
     private fun setExpanded(expanded: Boolean) {
         main.post {
-            val lp = params
-            if (lp == null) {
-                // Window not created yet — the old silent return here made a fast combo press do NOTHING.
-                // Record the intent; show() applies it as soon as the window exists.
-                pendingExpandAtMs = if (expanded) System.currentTimeMillis() else null
+            val shown = window as? WindowState.Shown
+            if (shown == null) {
+                // No window yet — record the intent; show() applies it as soon as the window exists.
+                window = WindowState.Hidden(expandRequestedAtMs = if (expanded) System.currentTimeMillis() else null)
                 return@post
             }
+            val w = shown.overlay
             expandedFlow.value = expanded
-            applyGeometry(lp, expanded)
-            runCatching { windowManager?.updateViewLayout(host?.composeView, lp) }
+            applyGeometry(w.params, expanded)
+            runCatching { windowManager?.updateViewLayout(w.host.composeView, w.params) }
             // On expand the window becomes focusable; pull window focus to the view so the controller's D-pad
             // reaches the Compose focus system (the panel itself requests focus to its first control). On
             // collapse, hand focus back so the game gets its input.
             if (expanded) {
                 lastHatX = 0; lastHatY = 0 // re-arm hat edge-detection so the first D-pad press registers
-                runCatching { host?.composeView?.requestFocus() }
+                runCatching { w.host.composeView.requestFocus() }
             } else {
-                runCatching { host?.composeView?.clearFocus() }
+                runCatching { w.host.composeView.clearFocus() }
             }
         }
     }

@@ -33,4 +33,11 @@ class QuickAccessNavTest {
         assertEquals(2, QuickAccessNav.clampItem(item = 2, itemCount = 5)) // still valid → unchanged
         assertEquals(0, QuickAccessNav.clampItem(item = 3, itemCount = 0))
     }
+
+    @Test
+    fun `switching tabs puts the cursor back at the top`() {
+        val onThirdItem = QuickAccessCursor().moveItem(delta = 2, itemCount = 5)
+        assertEquals(QuickAccessCursor(QuickAccessTab.SYSTEM), onThirdItem.moveTab(-1))
+        assertEquals(QuickAccessCursor(QuickAccessTab.FAN), onThirdItem.selectTab(QuickAccessTab.FAN))
+    }
 }
