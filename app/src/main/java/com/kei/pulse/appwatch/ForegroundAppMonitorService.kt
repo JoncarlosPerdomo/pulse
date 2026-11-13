@@ -31,6 +31,7 @@ import com.kei.pulse.MainActivity
 import com.kei.pulse.R
 import com.kei.pulse.data.AutoTuneController
 import com.kei.pulse.data.FanController
+import com.kei.pulse.data.CustomFanWatchdog
 import com.kei.pulse.data.FanCurveController
 import com.kei.pulse.data.FpsReader
 import com.kei.pulse.data.FrameLimiter
@@ -92,6 +93,12 @@ class ForegroundAppMonitorService : Service() {
     private val transitionMutex = Mutex()
     private val container by lazy { AppContainer(this) }
     private val fanController = FanController()
+    private val fanWatchdog by lazy {
+        CustomFanWatchdog(java.io.File(filesDir, "fan-heartbeat")) { script ->
+            com.kei.pulse.root.RootSupport.runGeneratedScript(this, "fan-watchdog.sh", script)
+                ?.trim() == "STARTED"
+        }
+    }
     private val fanCurveController = FanCurveController()
     private val fanTempController = FanTempController() // closed-loop temp-target PI (Smart Custom-fan mode)
     private var customFanSupportedCache: Boolean? = null // null = not yet probed (Odin-only node check)
@@ -585,6 +592,9 @@ class ForegroundAppMonitorService : Service() {
         // Safety net: if Custom was driving (vendor left in manual passthrough), hand the fan back to the Smart
         // auto-curve off-main so a teardown can't strand it in manual mode with no vendor thermal regulation.
         if (customFanRunning) {
+            customFanRunning = false
+            fanLoopJob?.cancel()
+            fanWatchdog.stop()
             Thread { runCatching { fanController.setMode(FanController.SMART) } }.start()
         }
         serviceScope.cancel()
@@ -866,6 +876,7 @@ class ForegroundAppMonitorService : Service() {
 
         // Active cooling: drive the Custom fan. Writing fan_mode=6 RESETS the Odin's duty to a ~50% mode-init
         // default, so pin our current intended duty in the SAME command (read-first → only on drift).
+        if (!fanWatchdog.refresh()) return false
         val intendedDuty = FanCurve.percentToDuty(fanCurveController.appliedPercent, fanCurveController.period)
         fanController.ensureManualMode(intendedDuty)
         if (settings.fanSmartEnabled) {
@@ -1001,6 +1012,7 @@ class ForegroundAppMonitorService : Service() {
     }
 
     private fun stopCustomFan(restoreVendor: Boolean = false) {
+        fanWatchdog.stop()
         customFanGate = CustomFanState() // re-arm the idle-on-Smart gate for the next Custom session
         if (customFanRunning) {
             customFanRunning = false
