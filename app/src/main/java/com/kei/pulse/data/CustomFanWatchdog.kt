@@ -6,16 +6,25 @@ import java.io.IOException
 
 /**
  * Hands the fan back to vendor Smart if Pulse dies while driving the Custom fan. Pulse rewrites a heartbeat
- * file every poll tick; a detached root script restores Smart once the heartbeat stops changing.
+ * file every poll tick; a detached root script, the watcher, restores Smart once the heartbeat stops changing.
+ * The watcher stamps [watcherStamp] every pass so Pulse can tell it is still alive.
  *
  * [now] must run on the boot-time clock the script reads from `/proc/uptime`.
  */
 class CustomFanWatchdog(
     private val heartbeat: File,
+    private val watcherStamp: File,
     private val now: () -> Long,
     private val launch: (String) -> String?,
 ) {
-    enum class Status { Armed, BackoffStarted, BackingOff }
+    sealed interface Status {
+        /** The watcher is alive and the heartbeat fresh. [FanController.ensureManualMode] requires this proof. */
+        sealed interface Armed : Status
+        data object BackoffStarted : Status
+        data object BackingOff : Status
+    }
+
+    private data object ArmedNow : Status.Armed
 
     internal sealed interface State {
         data object Idle : State
@@ -37,12 +46,12 @@ class CustomFanWatchdog(
     @Synchronized
     fun startOrBeatBeforeDriving(): Status {
         val startedAt = now()
-        if (actionFor(state, startedAt) == Action.Withhold) return Status.BackingOff
+        if (actionFor(state, startedAt, ::readWatcherStamp) == Action.Withhold) return Status.BackingOff
         var stampedAt = startedAt
         val outcome = try {
             writeHeartbeat(startedAt)
             stampedAt = now()
-            if (actionFor(state, stampedAt) == Action.Beat || launch(script(heartbeat.absolutePath))?.trim() == STARTED) {
+            if (actionFor(state, stampedAt, ::readWatcherStamp) == Action.Beat || launched(stampedAt)) {
                 LaunchOutcome.Succeeded
             } else {
                 LaunchOutcome.Failed
@@ -51,12 +60,23 @@ class CustomFanWatchdog(
             LaunchOutcome.Failed
         }
         state = next(state, stampedAt, outcome)
-        return if (outcome == LaunchOutcome.Succeeded) Status.Armed else Status.BackoffStarted
+        return if (outcome == LaunchOutcome.Succeeded) ArmedNow else Status.BackoffStarted
     }
 
     fun stop() {
         if (state is State.Armed) state = State.Idle
     }
+
+    private fun launched(nowMs: Long): Boolean =
+        launch(script(heartbeat.absolutePath, watcherStamp.absolutePath))?.trim() == STARTED &&
+            isWatcherLive(readWatcherStamp(), nowMs)
+
+    private fun readWatcherStamp(): Long? =
+        try {
+            watcherStamp.readText().trim().toLongOrNull()
+        } catch (_: IOException) {
+            null
+        }
 
     private fun writeHeartbeat(timeMs: Long) {
         val staged = File(heartbeat.parentFile, "${heartbeat.name}.next")
@@ -73,12 +93,22 @@ class CustomFanWatchdog(
         private const val LAUNCH_POLLS = LOCK_POLLS + 10
 
         internal const val STALE_AFTER_MS = 5 * MS_PER_SECOND
+        internal const val WATCHER_STALE_AFTER_MS = 3 * CHECK_INTERVAL_SECONDS * MS_PER_SECOND
         internal const val STARTED = "STARTED"
         internal const val LOCK_PATH = "/data/local/tmp/pulse-fan-watchdog.lock"
 
-        internal fun actionFor(state: State, nowMs: Long): Action = when (state) {
+        internal fun isWatcherLive(stampMs: Long?, nowMs: Long): Boolean =
+            stampMs != null && nowMs - stampMs < WATCHER_STALE_AFTER_MS
+
+        /** [watcherStampMs] is read only for an Armed state whose own heartbeat is still fresh. */
+        internal fun actionFor(state: State, nowMs: Long, watcherStampMs: () -> Long?): Action = when (state) {
             State.Idle -> Action.Launch
-            is State.Armed -> if (nowMs - state.lastBeatMs >= STALE_AFTER_MS) Action.Launch else Action.Beat
+            is State.Armed ->
+                if (nowMs - state.lastBeatMs >= STALE_AFTER_MS || !isWatcherLive(watcherStampMs(), nowMs)) {
+                    Action.Launch
+                } else {
+                    Action.Beat
+                }
             is State.BackingOff -> if (nowMs >= state.retryAtMs) Action.Launch else Action.Withhold
         }
 
@@ -89,6 +119,7 @@ class CustomFanWatchdog(
 
         internal fun script(
             heartbeatPath: String,
+            watcherStampPath: String,
             lockPath: String = LOCK_PATH,
             staleAfterMs: Long = STALE_AFTER_MS,
         ): String {
@@ -96,6 +127,7 @@ class CustomFanWatchdog(
             val bounceMode = FanController.bounceModeFor(FanController.SMART)
             return """
                 heartbeat=$heartbeat
+                alive=${SysfsBatch.shellQuote(watcherStampPath)}
                 lock=${SysfsBatch.shellQuote(lockPath)}
                 restoring=${SysfsBatch.shellQuote("$lockPath.restoring")}
                 ack=${SysfsBatch.shellQuote("$lockPath.ack")}
@@ -117,6 +149,9 @@ class CustomFanWatchdog(
                     fraction=${'$'}{uptime#*.}
                     fraction=${'$'}{fraction#0}
                     now_ms=${'$'}(( ${'$'}{uptime%.*} * $MS_PER_SECOND + ${'$'}{fraction:-0} * $MS_PER_UPTIME_CENTISECOND ))
+                }
+                stamp_alive() {
+                    echo ${'$'}now_ms > "${'$'}alive.next" && mv -f "${'$'}alive.next" "${'$'}alive"
                 }
                 restore_smart() {
                     trap '' TERM
@@ -152,13 +187,15 @@ class CustomFanWatchdog(
                     if [ "${'$'}marker_age" -ge 0 ] && [ "${'$'}marker_age" -le $staleAfterMs ] && [ "${'$'}(settings get system fan_mode)" = $bounceMode ]; then restore_smart; fi
                     rm -f "${'$'}restoring"
                 fi
+                read_clock
+                stamp_alive
                 : > "${'$'}ack"
                 last_beat=
-                read_clock
                 last_change_ms=${'$'}now_ms
                 while :; do
                     beat=${'$'}(cat "${'$'}heartbeat" 2>/dev/null)
                     read_clock
+                    stamp_alive
                     if [ -n "${'$'}beat" ] && [ "${'$'}beat" != "${'$'}last_beat" ]; then
                         last_beat=${'$'}beat
                         last_change_ms=${'$'}now_ms

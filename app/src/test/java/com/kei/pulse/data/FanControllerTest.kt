@@ -2,6 +2,7 @@ package com.kei.pulse.data
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 /**
@@ -37,5 +38,10 @@ class FanControllerTest {
         for (target in listOf(FanController.SILENT, FanController.SMART, FanController.SPORT)) {
             assertNotEquals(target, FanController.bounceModeFor(target))
         }
+    }
+
+    @Test
+    fun vendorModeWriteRefusesManualPassthrough() {
+        assertThrows(IllegalArgumentException::class.java) { FanController().setMode(FanController.CUSTOM) }
     }
 }

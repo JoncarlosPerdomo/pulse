@@ -97,7 +97,11 @@ class ForegroundAppMonitorService : Service() {
     private val container by lazy { AppContainer(this) }
     private val fanController = FanController()
     private val fanWatchdog by lazy {
-        CustomFanWatchdog(File(filesDir, "fan-heartbeat"), SystemClock::elapsedRealtime) { script ->
+        CustomFanWatchdog(
+            File(filesDir, "fan-heartbeat"),
+            File(filesDir, "fan-watcher-alive"),
+            SystemClock::elapsedRealtime,
+        ) { script ->
             RootSupport.runGeneratedScript(this, "fan-watchdog.sh", script)
         }
     }
@@ -871,12 +875,12 @@ class ForegroundAppMonitorService : Service() {
             }
         }
 
-        if (!armFanWatchdog()) return false
+        val armed = armFanWatchdog() ?: return false
 
         // Active cooling: drive the Custom fan. Writing fan_mode=6 RESETS the Odin's duty to a ~50% mode-init
         // default, so pin our current intended duty in the SAME command (read-first → only on drift).
         val intendedDuty = FanCurve.percentToDuty(fanCurveController.appliedPercent, fanCurveController.period)
-        fanController.ensureManualMode(intendedDuty)
+        fanController.ensureManualMode(armed, intendedDuty)
         if (settings.fanSmartEnabled) {
             fanCurveController.setTargetPercent(targetPercent)
         } else {
@@ -1037,15 +1041,15 @@ class ForegroundAppMonitorService : Service() {
         }
     }
 
-    private fun armFanWatchdog(): Boolean {
+    private fun armFanWatchdog(): CustomFanWatchdog.Status.Armed? {
         val status = fanWatchdog.startOrBeatBeforeDriving()
-        if (status == CustomFanWatchdog.Status.Armed) return true
+        if (status is CustomFanWatchdog.Status.Armed) return status
         if (status == CustomFanWatchdog.Status.BackoffStarted) {
             fanLog("CUSTOM watchdog unavailable; fan driving paused with retry backoff")
             stopCustomFan()
             handBackToSmart(Restore.InScope)
         }
-        return false
+        return null
     }
 
     /**
@@ -1818,7 +1822,7 @@ class ForegroundAppMonitorService : Service() {
             }
         }
         config.fanMode?.let { mode ->
-            fanController.setMode(mode)
+            if (mode != FanController.CUSTOM) fanController.setMode(mode)
             parts += "Fan ${FanController.labelFor(mode)}"
         }
         config.refreshRateHz?.let { hz ->
@@ -1868,7 +1872,7 @@ class ForegroundAppMonitorService : Service() {
             }
         }
         restore.activeTierLabel?.let { container.settingsStorage.persistActiveTierLabel(it) }
-        restore.fanMode?.let { fanController.setMode(it) }
+        restore.fanMode?.let { fanController.setMode(if (it == FanController.CUSTOM) FanController.SMART else it) }
         restore.refreshRateHz?.let { refreshRateController.setRate(it) }
         // Restore the CPU governor AutoTDP replaced with Balanced (captured pre-game).
         restore.governor?.let { governorController.setGovernorRaw(ensurePolicies(), it) }

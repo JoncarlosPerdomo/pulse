@@ -1,6 +1,5 @@
 package com.kei.pulse.data
 
-import com.kei.pulse.model.FanCurve
 import com.kei.pulse.root.RootSupport
 
 /**
@@ -18,6 +17,7 @@ class FanController {
 
     /**
      * Ensure the vendor fan controller is in manual passthrough ([CUSTOM]) so it stops regulating the duty.
+     * The only way into passthrough, and it takes [armed] so it can't be entered without a live watchdog.
      * Read-first so we only write on drift (no spurious settings-change broadcasts) — a cheap re-assert vs the
      * QS fan tile. Returns true if manual mode is (now) active.
      *
@@ -27,32 +27,18 @@ class FanController {
      * write — the trailing echo overwrites the 50% default before it can spin the fan up. Harmless where the
      * firmware doesn't reset (RP6/Thor): it just re-writes the value the duty already holds.
      */
-    fun ensureManualMode(reassertDuty: Int? = null): Boolean {
+    fun ensureManualMode(armed: CustomFanWatchdog.Status.Armed, reassertDuty: Int): Boolean {
         val before = readMode()
         if (before == CUSTOM) return true
-        val cmd = buildString {
-            append("settings put system fan_mode $CUSTOM")
-            if (reassertDuty != null) append("; echo $reassertDuty > $FAN_DUTY_PATH")
-        }
-        RootSupport.runRootCommand(cmd)
+        RootSupport.runRootCommand("settings put system fan_mode $CUSTOM; echo $reassertDuty > $FAN_DUTY_PATH")
         val after = readMode()
         android.util.Log.d("PulseFan", "ensureManualMode before=$before after=$after pinnedDuty=$reassertDuty ok=${after == CUSTOM}")
         return after == CUSTOM
     }
 
+    /** Write a vendor fan mode. Never [CUSTOM]: manual passthrough goes through [ensureManualMode]. */
     fun setMode(mode: Int): Boolean {
-        // Custom: put the vendor fan controller into MANUAL passthrough (fan_mode=CUSTOM) so it STOPS
-        // auto-regulating the gpio5_pwm2 duty. Otherwise its Smart/auto curve re-pins the duty faster than we
-        // re-assert (~200ms) and the fan audibly oscillates. Confirmed on the Odin (RP6/Thor share the firmware):
-        // writing fan_mode=6 makes a written duty stick; PULSE then owns the duty via FanCurveController. The
-        // service restores SMART when Custom is left or PULSE stops, so the fan is never stranded without
-        // vendor thermal regulation.
-        // Entering Custom: pin the quiet floor duty atomically with the fan_mode=6 write (writing fan_mode=6
-        // resets the Odin's duty to ~50%). The running service then slews from the floor toward the curve.
-        if (mode == CUSTOM) {
-            val period = FanCurveController.readPeriodFromDevice() ?: FanCurveController.DEFAULT_PERIOD
-            return ensureManualMode(FanCurve.percentToDuty(FanCurve.MIN_PERCENT, period))
-        }
+        require(mode != CUSTOM) { "Manual passthrough needs an armed fan watchdog" }
         // The stock controller caches the active mode and won't re-apply when set to the
         // same direction it already cached. Bounce through a different real mode first to
         // force a reload, then set the target. Reaching Smart bounces through SILENT (low),
@@ -86,9 +72,8 @@ class FanController {
                 "settings get system fan_mode"
 
         /**
-         * PULSE-driven custom fan curve (Odin 3 only). Not a stock fan_mode — when selected, the service
-         * drives the fan via [FanCurveController] (re-asserting the gpio5_pwm2/duty PWM node) instead of
-         * writing fan_mode. Picked a value outside the stock 1/4/5 range so it can't collide.
+         * Manual passthrough: the vendor controller stops regulating and PULSE drives the gpio5_pwm2 duty via
+         * [FanCurveController]. Outside the stock 1/4/5 range so it can't collide.
          */
         const val CUSTOM = 6
 
