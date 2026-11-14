@@ -548,10 +548,9 @@ class TunerViewModel(
 
     fun setFanMode(mode: Int, onSaved: () -> Unit = {}) {
         viewModelScope.launch {
-            val ok = withContext(Dispatchers.IO) { fanController.setMode(mode) }
-            // Custom drives the PWM curve and never writes a vendor fan_mode, so reflect the chosen mode
-            // directly — reading back the live value would still show Smart/etc. and the chip wouldn't stick.
-            _fanMode.value = if (mode == FanController.CUSTOM) {
+            val custom = mode == FanController.CUSTOM
+            val ok = custom || withContext(Dispatchers.IO) { fanController.setMode(mode) }
+            _fanMode.value = if (custom) {
                 mode
             } else {
                 withContext(Dispatchers.IO) { fanController.readMode() }
